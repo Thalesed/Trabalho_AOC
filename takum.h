@@ -30,7 +30,7 @@ uint32_t tk_sub(uint32_t a, uint32_t b, unsigned bits);
 uint32_t tk_mul(uint32_t a, uint32_t b, unsigned bits);
 uint32_t tk_convert(uint32_t word, unsigned from, unsigned to);
 
-/* API T16 original do Thales, preservada para chamadas existentes. */
+/* API T16 mantida para compatibilidade com o código existente. */
 float takum_to_float(takum16_t num);
 takum16_t float_to_takum(float x);
 takum16_t takum_add(takum16_t a, takum16_t b);
