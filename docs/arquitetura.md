@@ -2,7 +2,7 @@
 
 ## Variante numérica
 
-O projeto usa Takum **logarítmico**, como no artigo de 2024 citado nas diretrizes.
+O projeto usa a representação Takum **logarítmica**.
 Na libtakum essa família se chama `takum_log8/16/32`. A família chamada apenas
 `takum8/16/32` na biblioteca atual é linear; comparar as duas como se fossem a
 mesma codificação produziria resultados errados.
@@ -58,7 +58,7 @@ linear entre números reais.
 
 Na compilação padrão, soma e subtração decodificam, calculam e recodificam
 com intermediários IEEE binary128 (`__float128`, libquadmath).
-A API pública de entrada/saída continua em `long double`. O backend alternativo
+A API pública de entrada/saída usa `long double`. O backend alternativo
 `USE_FLOAT128=0` usa `long double` e pode errar perto de fronteiras.
 Multiplicação soma os logaritmos decodificados e combina os sinais, dispensando
 as conversões exponenciais intermediárias. Este é um modelo funcional, não
@@ -86,7 +86,7 @@ decodificador uma palavra por vez e interrompe na primeira instrução ilegal.
 `completed` informa quantas instruções foram concluídas. Isso permite escrever
 programas da extensão em vez de chamar somente operações em arrays.
 
-## Codificação proposta
+## Codificação das instruções
 
 Palavra de 32 bits com campos no estilo R e opcode local `0x0B` (custom-0).
 Esta é uma escolha do grupo para o simulador, não uma codificação oficial RVV.
@@ -141,5 +141,5 @@ tk_sim_status status = tk_sim_run(&s,program,2,&completed);
 
 O produto escalar ideal desses vetores é -4. Com operandos T16, a saída T32 da demonstração é
 aproximadamente -4,0020765 porque 2, 3 e 4 já foram quantizados para Takum antes
-da execução. A referência da fase 3 deverá distinguir erro de quantização dos
-operandos e erro de acumulação.
+da execução. Nos benchmarks, o erro de quantização dos operandos deve ser
+separado do erro de acumulação.
