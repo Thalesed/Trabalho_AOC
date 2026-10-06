@@ -44,10 +44,8 @@ make oracle
 
 O build padrão usa Float128 na codificação, soma e subtração. Para compilar sem quadmath, use `make clean` seguido de `make USE_FLOAT128=0`. Essa opção usa `long double` e tem precisão menor perto das fronteiras de arredondamento.
 
-## Escopo e pendências
+## Modelo
 
-O simulador executa as cinco instruções propostas com codificação própria. Não executa a ISA RISC-V completa nem mede ciclos. O produto escalar acumula em `long double` e retorna T32.
+O simulador executa as cinco instruções com uma codificação própria. O produto escalar acumula em `long double` e retorna T32. O estado vetorial usa 32 registradores de 256 bits, `VL` e `SEW` de 8, 16 ou 32 bits.
 
-Faltam os benchmarks de matrizes esparsas, a comparação com FP8/FP16/FP32, a análise de erros e de instruções/CSRs, o artigo e os slides.
-
-Detalhes da arquitetura e dos testes em [docs/arquitetura.md](docs/arquitetura.md) e [docs/validacao.md](docs/validacao.md).
+Detalhes da arquitetura e dos testes em [docs/arquitetura.md](docs/arquitetura.md) e [docs/testes.md](docs/testes.md).
