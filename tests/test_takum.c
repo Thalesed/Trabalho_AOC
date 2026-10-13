@@ -15,6 +15,7 @@ static uint32_t lane(const tk_sim *s, unsigned r, unsigned n, size_t i) {
     CHECK(tk_sim_read(s,r,n,i,&result) == TK_SIM_OK);
     return result;
 }
+/* Verifica conversoes, valores especiais, arredondamento e aritmetica escalar. */
 static void scalar(void) {
     CHECK(!tk_width_valid(0)); CHECK(!tk_width_valid(64));
     CHECK(tk_mask(32) == UINT32_MAX);
@@ -76,6 +77,7 @@ static void scalar(void) {
     CHECK(takum_multiply(float_to_takum(1),float_to_takum(1)) == float_to_takum(1));
     CHECK(takum_add(float_to_takum(1),0) == float_to_takum(1));
 }
+/* Valida operacoes vetoriais, VL, aliases de registradores e instrucoes invalidas. */
 static void vectors(void) {
     for (unsigned n = 8; n <= 32; n *= 2) {
         tk_sim s, before;
@@ -153,6 +155,7 @@ static void vectors(void) {
     CHECK(tk_instruction(TK_VNCVT,3,1,2) == UINT32_MAX);
     CHECK(tk_sim_setvl(NULL,4,16) == TK_SIM_BAD_ARGUMENT);
 }
+/* combinacoes aleatorias para comparar o simulador com o modelo escalar. */
 static void randomized_vectors(void) {
     for (unsigned trial = 0; trial < 3000; ++trial) {
         unsigned n = 8u << (random_word()%3), op = random_word()%5;
@@ -190,7 +193,7 @@ static void randomized_vectors(void) {
         CHECK(memcmp(s.v,expected.v,sizeof(s.v)) == 0);
         CHECK(s.pc == 4 && s.retired == 1 && s.elements == s.vl);
         expected = s;
-        /* Reserved funct3 values must leave the entire state unchanged. */
+        /* Funct3 reservado nao pode alterar o estado */
         CHECK(tk_sim_execute(&s,tk_instruction((tk_opcode)op,d,a,b) | (1u<<12)) == TK_SIM_ILLEGAL);
         CHECK(memcmp(&s,&expected,sizeof(s)) == 0);
     }

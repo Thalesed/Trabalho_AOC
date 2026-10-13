@@ -55,8 +55,7 @@ static void operations(uint32_t a, uint32_t b, unsigned n) {
     __float128 x = decode(a,n), y = decode(b,n);
     equal(tk_add(a,b,n),encode(x+y,n),"add128",n,a,b);
     equal(tk_sub(a,b,n),encode(x-y,n),"sub128",n,a,b);
-    /* Product logarithms are exact dyadic rationals; exp/log in the oracle
-       can perturb an exact tie, so multiplication uses exact log midpoints. */
+    /* Usa pontos médios exatos para evitar erros de arredondamento. */
 }
 int main(void) {
     for (unsigned n = 8; n <= 32; n *= 2) {

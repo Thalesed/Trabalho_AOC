@@ -18,6 +18,7 @@ uint32_t tk_mask(unsigned n) {
 uint32_t tk_nar(unsigned n) {
     return tk_width_valid(n) ? UINT32_C(1) << (n - 1) : 0;
 }
+/* Decodifica a palavra e calcula os campos na conversao */
 bool tk_extract(uint32_t word, unsigned n, takum_fields *f) {
     if (!tk_width_valid(n) || f == NULL) return false;
     word &= tk_mask(n);
@@ -46,6 +47,7 @@ long double tk_to_log(uint32_t word, unsigned n) {
     takum_fields f;
     return tk_extract(word, n, &f) ? f.l : NAN;
 }
+/* Reconstrui o valor real, sinal armazenado separado do modulo logaritmico */
 long double tk_to_ld(uint32_t word, unsigned n) {
     takum_fields f;
     if (!tk_extract(word, n, &f) || f.nar) return NAN;
@@ -58,6 +60,7 @@ static uint64_t round_even(uint64_t base, tk_wide x) {
     uint64_t q = base + (uint64_t)integral;
     return q + (fraction > 0.5L || (fraction == 0.5L && (q & 1)));
 }
+/* Codifica um logaritmo em DR/C/F, usando precisao maior antes de arredondar */
 static uint32_t from_log_wide(bool negative, tk_wide l, unsigned n) {
     if (!tk_width_valid(n)) return 0;
     uint32_t sign = tk_nar(n), mask = tk_mask(n);
@@ -82,7 +85,7 @@ static uint32_t from_log_wide(bool negative, tk_wide l, unsigned n) {
                              -(int)shift);
     uint64_t raw = round_even(prefix >> shift, tail);
     uint32_t result = (uint32_t)raw & mask;
-    /* Saturar: numero finito nao nulo nunca vira zero ou NaR. */
+    /* numero finito nao nulo nunca vira zero ou NaR. */
     if (result == 0) return negative ? mask : 1;
     if (result == sign) return negative ? sign + 1 : sign - 1;
     return result;
@@ -90,6 +93,7 @@ static uint32_t from_log_wide(bool negative, tk_wide l, unsigned n) {
 uint32_t tk_from_log(bool negative, long double l, unsigned n) {
     return from_log_wide(negative, l, n);
 }
+/* conversao valor real para dominio logaritmico em formato Takum. */
 static uint32_t from_wide(tk_wide x, unsigned n) {
     if (!tk_width_valid(n)) return 0;
     if (!isfinite(x)) return tk_nar(n);
@@ -97,6 +101,7 @@ static uint32_t from_wide(tk_wide x, unsigned n) {
     return from_log_wide(x < 0, 2 * tk_log(tk_abs(x)), n);
 }
 uint32_t tk_from_ld(long double x, unsigned n) { return from_wide(x,n); }
+/* Decodifica para um tipo amplo, preservando NaR e zero antes das operacoes. */
 static tk_wide to_wide(uint32_t a, unsigned n) {
     takum_fields f;
     if (!tk_extract(a,n,&f) || f.nar) return NAN;
@@ -114,10 +119,11 @@ uint32_t tk_mul(uint32_t a, uint32_t b, unsigned n) {
     a &= tk_mask(n); b &= tk_mask(n);
     if (a == tk_nar(n) || b == tk_nar(n)) return tk_nar(n);
     if (a == 0 || b == 0) return 0;
-    /* Multiplicacao logaritmica: soma dos logaritmos, sem exp/log extras. */
+    /* Multiplicacao logaritmica: soma dos logaritmos */
     return tk_from_log(((a ^ b) & tk_nar(n)) != 0,
                        tk_to_log(a,n) + tk_to_log(b,n), n);
 }
+/* Reduz ou amplia a palavra, se reduzir, arredonda e evita zero/NaR */
 uint32_t tk_convert(uint32_t word, unsigned from, unsigned to) {
     if (!tk_width_valid(from) || !tk_width_valid(to)) return 0;
     word &= tk_mask(from);

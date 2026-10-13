@@ -9,6 +9,7 @@
 static unsigned long checks;
 static uint32_t state = UINT32_C(0x27182818);
 static uint32_t rng(void) { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return state; }
+/* Adapta palavras inteiras aos tipos Takum da biblioteca de referencia. */
 static takum_log8 t8(uint32_t a) { uint8_t x = (uint8_t)a; takum_log8 t; memcpy(&t,&x,1); return t; }
 static takum_log16 t16(uint32_t a) { uint16_t x = (uint16_t)a; takum_log16 t; memcpy(&t,&x,2); return t; }
 static takum_log32 t32(uint32_t a) { takum_log32 t; memcpy(&t,&a,4); return t; }
@@ -19,6 +20,7 @@ static void equal(uint32_t ours, uint32_t ref, unsigned n, const char *label, ui
         exit(EXIT_FAILURE);
     }
 }
+/* Compara decodificacao, codificacao, conversao e operacoes com a libtakum. */
 static double reference_decode(uint32_t a, unsigned n) {
     return n == 8 ? takum_log8_to_float64(t8(a)) : n == 16 ?
            takum_log16_to_float64(t16(a)) : takum_log32_to_float64(t32(a));
@@ -47,6 +49,7 @@ static void compare_operations(uint32_t a, uint32_t b, unsigned n) {
     equal(tk_sub(a,b,n),reference_op(a,b,n,1),n,"sub",a,b);
     equal(tk_mul(a,b,n),reference_op(a,b,n,2),n,"mul",a,b);
 }
+/* Aceita pequenas diferencas numericas apenas na decodificacao. */
 static void compare_decode(uint32_t word, unsigned n) {
     long double x = tk_to_ld(word,n);
     double y = reference_decode(word,n);
@@ -58,6 +61,7 @@ static void compare_decode(uint32_t word, unsigned n) {
 }
 int main(void) {
     for (unsigned n = 8; n <= 32; n *= 2) {
+        /* T8/T16 sao exaustivos; T32 usa amostragem aleatoria. */
         uint32_t count = n < 32 ? 1u << n : 100000;
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t word = n < 32 ? i : rng();

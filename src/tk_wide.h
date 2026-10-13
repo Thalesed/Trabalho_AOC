@@ -1,6 +1,6 @@
 #ifndef TK_WIDE_H
 #define TK_WIDE_H
-/* Float128 in the default GCC build; portable long double fallback. */
+/* Usa Float128 quando disponível e long double como alternativa portátil. */
 #ifdef TAKUM_USE_FLOAT128
 #include <quadmath.h>
 typedef __float128 tk_wide;

@@ -8,6 +8,7 @@
 #define TK_CUSTOM_OPCODE 0x0bu
 
 typedef enum {
+    /* Operaçoes aritméticas e conversão da extensão simulada*/
     TK_VTADD = 0, TK_VTSUB = 1, TK_VTMUL = 2, TK_VTDOT = 3, TK_VNCVT = 4
 } tk_opcode;
 typedef enum {
