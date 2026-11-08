@@ -1,0 +1,39 @@
+=== Benchmark SpMV (y = A*x) — Takum vs IEEE 754 ===
+REPEATS_PER_SIZE=20  SPARSITY=0.90  SEED=0xDEADBEEF
+
+size   nnz      tipo     time_ms(mean) err_mean     err_max      err_p95      err_p99     
+64     411      F32      0.0017       1.064e-07    1.154e-06    2.917e-07    1.154e-06   
+64     411      F64      0.0016       2.428e-16    2.043e-15    1.160e-15    2.043e-15   
+64     411      T8       1.3749       9.534e-02    1.202e+00    4.432e-01    1.202e+00   
+64     411      T16      1.3403       4.415e-04    6.150e-03    1.598e-03    6.150e-03   
+64     411      T32      1.3568       4.628e-09    4.171e-08    1.573e-08    4.171e-08   
+128    1627     F32      0.0065       1.968e-07    5.613e-06    4.103e-07    5.539e-06   
+128    1627     F64      0.0062       2.340e-16    4.517e-15    6.102e-16    2.382e-15   
+128    1627     T8       5.0107       1.020e-01    1.400e+00    3.474e-01    1.107e+00   
+128    1627     T16      5.0174       3.838e-04    5.368e-03    1.412e-03    5.141e-03   
+128    1627     T32      3.8357       5.046e-09    4.195e-08    2.051e-08    3.749e-08   
+256    6642     F32      0.0171       3.816e-07    1.017e-05    2.359e-06    6.415e-06   
+256    6642     F64      0.0169       5.778e-16    1.363e-14    2.111e-15    1.060e-14   
+256    6642     T8       13.2706      2.092e-01    1.123e+01    8.332e-01    3.521e+00   
+256    6642     T16      13.1201      7.161e-04    2.531e-02    3.143e-03    1.267e-02   
+256    6642     T32      13.4448      9.836e-09    3.473e-07    3.958e-08    1.477e-07   
+512    26395    F32      0.0649       5.174e-07    1.256e-04    9.909e-07    3.246e-06   
+512    26395    F64      0.0653       1.340e-15    4.297e-13    1.753e-15    5.623e-15   
+512    26395    T8       50.9363      4.817e-01    1.877e+02    4.189e-01    1.320e+00   
+512    26395    T16      51.6608      6.968e-04    1.488e-01    1.641e-03    4.824e-03   
+512    26395    T32      52.8612      2.054e-08    6.876e-06    2.015e-08    9.066e-08   
+
+=== Médias por tipo (todos os tamanhos) ===
+fmt    time_ms(mean)  err_mean     err_max      err_p95      err_p99      inst_retired   elements       CSR_writes
+T8     17.6481        2.221e-01    5.039e+01    5.107e-01    1.788e+00    30180          701500         0         
+T16    17.7846        5.596e-04    4.641e-02    1.948e-03    7.197e-03    52640          701500         0         
+T32    17.8746        1.001e-08    1.827e-06    2.399e-08    7.939e-08    95800          701500         0         
+F32    0.0225         3.005e-07    3.563e-05    1.013e-06    4.089e-06    0              0              35075     
+F64    0.0225         5.987e-16    1.125e-13    1.409e-15    5.162e-15    0              0              35075     
+
+=== Complexidade de instruções / CSRs ===
+Takum (Zvtakum): nenhum CSR dedicado (sem frm, fflags, NaN-boxing). fflags não é atualizado por operações Takum.
+IEEE 754 (RVV tradicional): estimativa de 1 escrita de fflags por elemento multiplicado (upper bound; na prática só em exceções, mas o CSR existe e deve ser preservado).
+Redução de CSRs: T8/T16/T32 = 0 escritas vs ~nnz para IEEE.
+
+Arquivos gerados: benchmark_results.csv, benchmark_hist_T8.csv, benchmark_hist_T16.csv, benchmark_hist_T32.csv
