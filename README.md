@@ -42,6 +42,17 @@ git -C ../reference-libtakum checkout 776ac0ca7855f640100731ed8bbb0c7cf83b2d94
 make oracle
 ```
 
+
+## Benchmark
+
+Compilar e rodar:
+
+```sh
+make benchmark
+```
+
+O benchmark gera como saída arquivos .csv com os dados e comparações para float e para takum. Em benchmark/benchmark_takum.ipynb há gráficos das comparações feitas.
+
 O build padrão usa Float128 na codificação, soma e subtração. Para compilar sem quadmath, use `make clean` seguido de `make USE_FLOAT128=0`. Essa opção usa `long double` e tem precisão menor perto das fronteiras de arredondamento.
 
 ## Modelo

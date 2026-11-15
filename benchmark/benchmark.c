@@ -1,15 +1,4 @@
-/* benchmark.c — Avaliação experimental SpMV (y = A * x) em Takum vs IEEE 754
- *   - Multiplicação matriz-vetor com matrizes esparsas (CSR)
- *   - Distribuição do erro relativo acumulado vs Float128
- *   - Redução de instruções e CSRs (contadores por tipo)
- *   - Tempo de execução cronometrado
- *
- * Compilar:  make benchmark
- * Executar:                        ./build/benchmark
- * Saídas:                          benchmark_results.csv
- *                                  benchmark_summary.txt
- *                                  benchmark_hist_T8.csv / T16 / T32
- */
+/* benchmark.c */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -98,7 +87,7 @@ static int csr_generate(csr_matrix *m, unsigned n) {
         return -1;
     }
 
-    /* Replay only the sparsity decisions; values use an independent RNG. */
+    /* Decisão das posições não nulas da matriz esparsa */
     g_state = decision_seed;
     uint32_t value_state = decision_seed ^ 0xA5A5A5A5u;
     if (value_state == 0) value_state = 1;
@@ -124,7 +113,7 @@ static int csr_generate(csr_matrix *m, unsigned n) {
     return 0;
 }
 
-/*  Tipo: referência Float128 (precisão quádrupla) */
+/*  Referência Float128 (precisão quádrupla) */
 #ifdef TAKUM_USE_FLOAT128
 typedef __float128 ref_t;
 #define REF(x) ((ref_t)(x))
@@ -205,6 +194,20 @@ static void spmv_f64(const csr_matrix *A, const long double *x, double *y) {
         for (uint32_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k)
             s += (double)A->vals[k] * (double)x[A->col_idx[k]];
         y[i] = s;
+    }
+}
+__extension__ typedef _Float16 float16_t;
+
+static void spmv_f16(const csr_matrix *A, const long double *x, long double *y) {
+    for (unsigned i = 0; i < A->n; ++i) {
+        float16_t s = (float16_t)0.0;
+        for (uint32_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k) {
+            const float16_t a = (float16_t)A->vals[k];
+            const float16_t b = (float16_t)x[A->col_idx[k]];
+            const float16_t product = (float16_t)(a * b);
+            s = (float16_t)(s + product);
+        }
+        y[i] = (long double)s;
     }
 }
 
@@ -338,6 +341,7 @@ int main(void) {
         {"T8",  0,0, 0,0,0,0, 0,0,0,0, 0},
         {"T16", 0,0, 0,0,0,0, 0,0,0,0, 0},
         {"T32", 0,0, 0,0,0,0, 0,0,0,0, 0},
+        {"F16", 0,0, 0,0,0,0, 0,0,0,0, 0},
         {"F32", 0,0, 0,0,0,0, 0,0,0,0, 0},
         {"F64", 0,0, 0,0,0,0, 0,0,0,0, 0},
     };
@@ -359,11 +363,13 @@ int main(void) {
         long double *y_t8  = malloc(n * sizeof(long double));
         long double *y_t16 = malloc(n * sizeof(long double));
         long double *y_t32 = malloc(n * sizeof(long double));
+        long double *y_f16 = malloc(n * sizeof(long double));
         long double *y_f32 = malloc(n * sizeof(long double));
         long double *y_f64 = malloc(n * sizeof(long double));
         ref_t *ref = malloc(n * sizeof(ref_t));
         uint32_t *y_tk = malloc(n * sizeof(uint32_t));
-        if (!x || !y_ref || !y_t8 || !y_t16 || !y_t32 || !y_f32 || !y_f64 || !ref || !y_tk) {
+        if (!x || !y_ref || !y_t8 || !y_t16 || !y_t32 || !y_f16 ||
+            !y_f32 || !y_f64 || !ref || !y_tk) {
             fprintf(stderr, "OOM\n"); return 1;
         }
 
@@ -373,6 +379,30 @@ int main(void) {
         /* referência Float128 */
         spmv_ref(&A, x, ref);
         for (unsigned i = 0; i < n; ++i) y_ref[i] = (long double)ref[i];
+
+        {
+            double t_sum = 0; err_stats es = {0};
+            for (unsigned r = 0; r < REPEATS_PER_SIZE; ++r) {
+                double t0 = now_sec();
+                spmv_f16(&A, x, y_f16);
+                double t1 = now_sec();
+                t_sum += (t1 - t0);
+                err_stats e = compute_err(ref, y_f16, n);
+                es = e;
+                fprintf(csv, "%u,%zu,F16,%u,%.9f,%u,0,0,0,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
+                        n, A.nnz, r, (t1 - t0), (unsigned)A.nnz,
+                        e.mean, e.rms, e.max, e.p95, e.p99,
+                        (double)(n ? y_f16[0] : 0));
+            }
+            double t_mean = t_sum / REPEATS_PER_SIZE;
+            acc[3].t_sum += t_mean; acc[3].t_cnt++;
+            acc[3].err_mean_acc += es.mean; acc[3].err_max_acc += es.max;
+            acc[3].err_p95_acc += es.p95; acc[3].err_p99_acc += es.p99;
+            acc[3].csr_acc += (uint64_t)A.nnz;
+            acc[3].runs++;
+            fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
+                    n, A.nnz, "F16", t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
+        }
 
         /* -------- Float32 -------- */
         {
@@ -393,11 +423,11 @@ int main(void) {
             }
             free(yf);
             double t_mean = t_sum / REPEATS_PER_SIZE;
-            acc[3].t_sum += t_mean; acc[3].t_cnt++;
-            acc[3].err_mean_acc += es.mean; acc[3].err_max_acc += es.max;
-            acc[3].err_p95_acc += es.p95;  acc[3].err_p99_acc += es.p99;
-            acc[3].csr_acc += (uint64_t)A.nnz; /* IEEE trad.: 1 CSR write por elem (upper bound) */
-            acc[3].runs++;
+            acc[4].t_sum += t_mean; acc[4].t_cnt++;
+            acc[4].err_mean_acc += es.mean; acc[4].err_max_acc += es.max;
+            acc[4].err_p95_acc += es.p95;  acc[4].err_p99_acc += es.p99;
+            acc[4].csr_acc += (uint64_t)A.nnz; /* IEEE trad.: 1 CSR write por elem (upper bound) */
+            acc[4].runs++;
             fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
                     n, A.nnz, "F32", t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
         }
@@ -421,11 +451,11 @@ int main(void) {
             }
             free(yd);
             double t_mean = t_sum / REPEATS_PER_SIZE;
-            acc[4].t_sum += t_mean; acc[4].t_cnt++;
-            acc[4].err_mean_acc += es.mean; acc[4].err_max_acc += es.max;
-            acc[4].err_p95_acc += es.p95;  acc[4].err_p99_acc += es.p99;
-            acc[4].csr_acc += (uint64_t)A.nnz;
-            acc[4].runs++;
+            acc[5].t_sum += t_mean; acc[5].t_cnt++;
+            acc[5].err_mean_acc += es.mean; acc[5].err_max_acc += es.max;
+            acc[5].err_p95_acc += es.p95;  acc[5].err_p99_acc += es.p99;
+            acc[5].csr_acc += (uint64_t)A.nnz;
+            acc[5].runs++;
             fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
                     n, A.nnz, "F64", t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
         }
@@ -487,9 +517,27 @@ int main(void) {
             }
         }
 
+        {
+            long double *hist_values[] = {y_f16, y_f32, y_f64};
+            const char *hist_names[] = {"F16", "F32", "F64"};
+            for (unsigned k = 0; k < 3; ++k) {
+                hist_log2(ref, hist_values[k], n, hist_buf, nbins, hist_lo, hist_hi);
+                char fname[64];
+                snprintf(fname, sizeof(fname), "benchmark_hist_%s.csv", hist_names[k]);
+                FILE *hf = fopen(fname, "w");
+                if (hf) {
+                    fprintf(hf, "log2_err_bucket,count\n");
+                    double step = (hist_hi - hist_lo) / nbins;
+                    for (unsigned b = 0; b < nbins; ++b)
+                        fprintf(hf, "%.2f,%u\n", hist_lo + (b + 0.5) * step, hist_buf[b]);
+                    fclose(hf);
+                }
+            }
+        }
+
         csr_free(&A);
         free(x); free(y_ref); free(y_t8); free(y_t16); free(y_t32);
-        free(y_f32); free(y_f64); free(ref); free(y_tk);
+        free(y_f16); free(y_f32); free(y_f64); free(ref); free(y_tk);
     }
 
     /* ---------- Resumo agregado + CSRs ---------- */
@@ -513,7 +561,7 @@ int main(void) {
     }
 
     fprintf(sum, "\n=== Complexidade de instruções / CSRs ===\n");
-    fprintf(sum, "Takum (Zvtakum): nenhum CSR dedicado (sem frm, fflags, "
+    fprintf(sum, "Takum: nenhum CSR dedicado (sem frm, fflags, "
                  "NaN-boxing). fflags não é atualizado por operações Takum.\n");
     fprintf(sum, "IEEE 754 (RVV tradicional): estimativa de 1 escrita de fflags "
                  "por elemento multiplicado (upper bound; na prática só em "
@@ -521,7 +569,9 @@ int main(void) {
     fprintf(sum, "Redução de CSRs: T8/T16/T32 = 0 escritas vs ~nnz para IEEE.\n");
     fprintf(sum, "\nArquivos gerados: benchmark_results.csv, "
                  "benchmark_hist_T8.csv, benchmark_hist_T16.csv, "
-                 "benchmark_hist_T32.csv\n");
+                 "benchmark_hist_T32.csv, "
+                 "benchmark_hist_F16.csv, benchmark_hist_F32.csv, "
+                 "benchmark_hist_F64.csv\n");
 
     free(hist_buf);
     fclose(csv); fclose(sum);
