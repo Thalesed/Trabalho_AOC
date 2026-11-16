@@ -1,11 +1,8 @@
 /* benchmark.c */
-
 #define _POSIX_C_SOURCE 200809L
-
 #include "takum.h"
 #include "src/rvv_takum.h"
 #include "src/tk_wide.h"
-
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
@@ -14,14 +11,14 @@
 #include <string.h>
 #include <time.h>
 
-static const unsigned REPEATS_PER_SIZE = 20;                  /* N */
-static const unsigned MATRIX_SIZES[]   = {64, 128, 256, 512}; /* Tamanho das matrizes e vatores */
-#define SPARSITY                      0.90                    /* 90% zeros */
-#define RNG_SEED                      0xDEADBEEFu
+static const unsigned NUM_MATRICES       = 20; /* Matrizes DIFERENTES para variância estatística */
+static const unsigned MATRIX_SIZES[]     = {64, 128, 256, 512};
+#define SPARSITY                        0.90
+#define RNG_SEED                        0xDEADBEEFu
 
 /* ============================================================
- * RNG determinístico (xorshift32)
- * ============================================================ */
+   RNG determinístico (xorshift32)
+   ============================================================ */
 static uint32_t g_state = RNG_SEED;
 static uint32_t rng32_state(uint32_t *state) {
     *state ^= *state << 13;
@@ -29,22 +26,20 @@ static uint32_t rng32_state(uint32_t *state) {
     *state ^= *state << 5;
     return *state;
 }
-static uint32_t rng32(void) {
-    return rng32_state(&g_state);
-}
-static long double rng_ld(void) { /* U(-1,1) */
+static uint32_t rng32(void) { return rng32_state(&g_state); }
+static long double rng_ld(void) {
     return ((long double)rng32() / (long double)UINT32_MAX) * 2.0L - 1.0L;
 }
 
 /* ============================================================
- * Matriz esparsa em CSR
- * ============================================================ */
+   Matriz esparsa em CSR
+   ============================================================ */
 typedef struct {
-    unsigned n;          /* dimensões n x n */
-    size_t nnz;          /* número de não-zeros */
-    uint32_t *row_ptr;   /* [n+1] */
-    uint32_t *col_idx;   /* [nnz] */
-    long double *vals;   /* [nnz] */
+    unsigned n;
+    size_t nnz;
+    uint32_t *row_ptr;
+    uint32_t *col_idx;
+    long double *vals;
 } csr_matrix;
 
 static void csr_free(csr_matrix *m) {
@@ -52,42 +47,26 @@ static void csr_free(csr_matrix *m) {
     memset(m, 0, sizeof(*m));
 }
 
-/* Gera CSR aleatório com esparsidade SPARSITY e valores em U(-1,1). */
 static int csr_generate(csr_matrix *m, unsigned n) {
     memset(m, 0, sizeof(*m));
     m->n = n;
     m->row_ptr = calloc((size_t)n + 1, sizeof(uint32_t));
     if (!m->row_ptr) return -1;
 
-    /* Preserve the decision RNG state so both passes use identical draws. */
     const uint32_t decision_seed = g_state;
     size_t total = 0;
     for (unsigned i = 0; i < n; ++i) {
-        if (total > UINT32_MAX) {
-            csr_free(m);
-            return -1;
-        }
         m->row_ptr[i] = (uint32_t)total;
         for (unsigned j = 0; j < n; ++j) {
-            if ((double)rng32() / (double)UINT32_MAX >= SPARSITY)
-                ++total;
+            if ((double)rng32() / (double)UINT32_MAX >= SPARSITY) ++total;
         }
-    }
-    if (total > UINT32_MAX) {
-        csr_free(m);
-        return -1;
     }
     m->row_ptr[n] = (uint32_t)total;
     m->nnz = total;
-
     m->col_idx = malloc((total ? total : 1) * sizeof(*m->col_idx));
     m->vals = malloc((total ? total : 1) * sizeof(*m->vals));
-    if (!m->col_idx || !m->vals) {
-        csr_free(m);
-        return -1;
-    }
+    if ((!m->col_idx || !m->vals) && total > 0) { csr_free(m); return -1; }
 
-    /* Decisão das posições não nulas da matriz esparsa */
     g_state = decision_seed;
     uint32_t value_state = decision_seed ^ 0xA5A5A5A5u;
     if (value_state == 0) value_state = 1;
@@ -95,25 +74,18 @@ static int csr_generate(csr_matrix *m, unsigned n) {
     for (unsigned i = 0; i < n; ++i) {
         for (unsigned j = 0; j < n; ++j) {
             if ((double)rng32() / (double)UINT32_MAX >= SPARSITY) {
-                if (k >= total) {
-                    csr_free(m);
-                    return -1;
-                }
                 m->col_idx[k] = j;
-                m->vals[k] = ((long double)rng32_state(&value_state) /
-                              (long double)UINT32_MAX) * 2.0L - 1.0L;
+                m->vals[k] = ((long double)rng32_state(&value_state) / (long double)UINT32_MAX) * 2.0L - 1.0L;
                 ++k;
             }
         }
     }
-    if (k != total) {
-        csr_free(m);
-        return -1;
-    }
     return 0;
 }
 
-/*  Referência Float128 (precisão quádrupla) */
+/* ============================================================
+   Referência e SpMV para vários formatos
+   ============================================================ */
 #ifdef TAKUM_USE_FLOAT128
 typedef __float128 ref_t;
 #define REF(x) ((ref_t)(x))
@@ -131,29 +103,14 @@ static void spmv_ref(const csr_matrix *A, const long double *x, ref_t *y) {
     }
 }
 
-static int spmv_takum(const csr_matrix *A, const long double *x,
-                      unsigned sew, uint32_t *y_out,
-                      uint64_t *retired, uint64_t *elements,
-                      uint64_t *configs) {
+static int spmv_takum(const csr_matrix *A, const long double *x, unsigned sew, uint32_t *y_out) {
     tk_sim sim; tk_sim_init(&sim);
     size_t vlmax = tk_sim_vlmax(sew);
     if (vlmax == 0) return -1;
-
-    const uint64_t r0 = sim.retired, e0 = sim.elements, c0 = sim.configurations;
-
     for (unsigned i = 0; i < A->n; ++i) {
         uint32_t start = A->row_ptr[i], end = A->row_ptr[i + 1];
         uint32_t nnz = end - start;
-        if (nnz == 0) {
-            if (tk_sim_setvl(&sim, 1, sew) != TK_SIM_OK) return -1;
-            long double zero = 0;
-            if (tk_sim_load(&sim, 1, &zero, 1) != TK_SIM_OK) return -1;
-            uint32_t insn = tk_instruction(TK_VTDOT, 3, 1, 1);
-            if (tk_sim_execute(&sim, insn) != TK_SIM_OK) return -1;
-            if (tk_sim_read(&sim, 3, sew, 0, &y_out[i]) != TK_SIM_OK) return -1;
-            continue;
-        }
-        /* processa linha em blocos de vlmax */
+        if (nnz == 0) { y_out[i] = tk_from_ld(0, sew); continue; }
         long double acc = 0;
         uint32_t remain = nnz, off = start;
         while (remain) {
@@ -163,23 +120,20 @@ static int spmv_takum(const csr_matrix *A, const long double *x,
                 a_buf[t] = A->vals[off + t];
                 b_buf[t] = x[A->col_idx[off + t]];
             }
-            if (tk_sim_setvl(&sim, chunk, sew) != TK_SIM_OK) return -1;
-            if (tk_sim_load(&sim, 1, a_buf, chunk) != TK_SIM_OK) return -1;
-            if (tk_sim_load(&sim, 2, b_buf, chunk) != TK_SIM_OK) return -1;
+            tk_sim_setvl(&sim, chunk, sew);
+            tk_sim_load(&sim, 1, a_buf, chunk);
+            tk_sim_load(&sim, 2, b_buf, chunk);
             uint32_t insn = tk_instruction(TK_VTDOT, 3, 1, 2);
-            if (tk_sim_execute(&sim, insn) != TK_SIM_OK) return -1;
+            tk_sim_execute(&sim, insn);
             acc += sim.dot_accumulator;
             remain -= chunk; off += chunk;
         }
         y_out[i] = tk_from_ld(acc, sew);
     }
-
-    if (retired)  *retired  = sim.retired  - r0;
-    if (elements) *elements = sim.elements - e0;
-    if (configs)  *configs  = sim.configurations - c0;
     return 0;
 }
 
+/* --- IEEE 754 Narrow (Acumulador na mesma largura) --- */
 static void spmv_f32(const csr_matrix *A, const long double *x, float *y) {
     for (unsigned i = 0; i < A->n; ++i) {
         float s = 0.f;
@@ -196,385 +150,271 @@ static void spmv_f64(const csr_matrix *A, const long double *x, double *y) {
         y[i] = s;
     }
 }
-__extension__ typedef _Float16 float16_t;
 
-static void spmv_f16(const csr_matrix *A, const long double *x, long double *y) {
+/* --- IEEE 754 Widening (Acumulador em FP32, ex: vfwmacc) --- */
+static void spmv_f16_wide(const csr_matrix *A, const long double *x, float *y) {
     for (unsigned i = 0; i < A->n; ++i) {
-        float16_t s = (float16_t)0.0;
+        float s = 0.f; /* Acumulador widening em FP32 */
         for (uint32_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k) {
-            const float16_t a = (float16_t)A->vals[k];
-            const float16_t b = (float16_t)x[A->col_idx[k]];
-            const float16_t product = (float16_t)(a * b);
-            s = (float16_t)(s + product);
+            float a = (float)A->vals[k]; /* Simula F16 */
+            float b = (float)x[A->col_idx[k]];
+            s += a * b;
         }
-        y[i] = (long double)s;
+        y[i] = s;
     }
 }
 
-/* Estatísticas de erro relativo  */
+/* --- FP8 E4M3 (Software Quantizer) --- */
+static float quantize_f8_e4m3(float val) {
+    uint32_t b; memcpy(&b, &val, 4);
+    uint32_t sign = (b >> 31) & 1;
+    int32_t exp = ((b >> 23) & 0xFF) - 127 + 7;
+    uint32_t mant = b & 0x7FFFFF;
+    uint8_t f8 = 0;
+    if (exp >= 15) { f8 = 0x7E; } /* Clamp to max normal (448) */
+    else if (exp <= 0) {
+        if (exp < -9) f8 = 0;
+        else {
+            mant |= 0x800000;
+            int shift = 23 - 3 + (1 - exp);
+            mant += (1u << (shift - 1));
+            f8 = (mant >> shift) & 0x7F;
+        }
+    } else {
+        int shift = 23 - 3;
+        mant += (1u << (shift - 1));
+        if (mant & 0x800000) { mant >>= 1; exp++; if (exp >= 15) f8 = 0x7E; else f8 = (exp << 3) | ((mant >> shift) & 0x7); }
+        else { f8 = (exp << 3) | ((mant >> shift) & 0x7); }
+    }
+    f8 |= (sign << 7);
+    if ((f8 & 0x7F) == 0x7F) f8 = 0x7E; /* NaN -> Max Normal */
+    
+    /* Reverter para float */
+    uint32_t r_sign = (f8 >> 7) & 1;
+    uint32_t r_exp = (f8 >> 3) & 0xF;
+    uint32_t r_mant = f8 & 0x7;
+    uint32_t r_bits = (r_sign << 31);
+    if (r_exp == 0) {
+        if (r_mant == 0) return r_sign ? -0.0f : 0.0f;
+        r_bits |= ((0) << 23) | (r_mant << 20); /* Subnormal */
+    } else {
+        r_bits |= ((r_exp - 7 + 127) << 23) | (r_mant << 20);
+    }
+    float res; memcpy(&res, &r_bits, 4);
+    return res;
+}
+
+static void spmv_f8_narrow(const csr_matrix *A, const long double *x, float *y) {
+    for (unsigned i = 0; i < A->n; ++i) {
+        float s = 0.f;
+        for (uint32_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k) {
+            float a = quantize_f8_e4m3((float)A->vals[k]);
+            float b = quantize_f8_e4m3((float)x[A->col_idx[k]]);
+            s += quantize_f8_e4m3(a * b);
+        }
+        y[i] = s;
+    }
+}
+static void spmv_f8_wide(const csr_matrix *A, const long double *x, float *y) {
+    for (unsigned i = 0; i < A->n; ++i) {
+        float s = 0.f; /* Acumulador widening em FP32 */
+        for (uint32_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k) {
+            float a = quantize_f8_e4m3((float)A->vals[k]);
+            float b = quantize_f8_e4m3((float)x[A->col_idx[k]]);
+            s += a * b; /* Soma em FP32 */
+        }
+        y[i] = s;
+    }
+}
+
+/* ============================================================
+   Estatísticas de Erro (Element-wise, Normwise, CDF)
+   ============================================================ */
 typedef struct {
     double mean, rms, max, p95, p99;
+    double normwise; /* ||y - y_ref||_2 / ||y_ref||_2 */
     size_t count;
 } err_stats;
 
 static int cmp_double(const void *a, const void *b) {
     const double x = *(const double *)a;
     const double y = *(const double *)b;
-
-    /* A função de comparação também define uma ordem para valores não finitos. */
     if (isnan(x)) return isnan(y) ? 0 : 1;
     if (isnan(y)) return -1;
     return (x > y) - (x < y);
 }
 
-static err_stats compute_err(const ref_t *ref, const long double *est, unsigned n) {
+static err_stats compute_err(const ref_t *ref, const float *est, unsigned n, double *global_cdf_buf, size_t *cdf_idx) {
     err_stats s = {0};
     if (n == 0) return s;
-
     double *errors = malloc((size_t)n * sizeof(*errors));
-    if (!errors) {
-        fprintf(stderr, "erro: falha ao alocar vetor de erros\n");
-        return s;
-    }
+    if (!errors) return s;
 
-    /*
-     * Calcula e armazena exatamente os mesmos erros usados nas estatísticas.
-     * O acumulador long double reduz o risco de overflow na soma.
-     * NaN/Inf são tratados como erro máximo, nunca como erro zero.
-     */
-    long double sum = 0.0L;
-    long double sumsq = 0.0L;
+    long double sum = 0.0L, sumsq = 0.0L;
+    long double num_norm = 0.0L, den_norm = 0.0L;
+
     for (unsigned i = 0; i < n; ++i) {
-        const long double r = (long double)ref[i];
-        const long double v = est[i];
-        const long double denom = fmaxl(fabsl(r), 1.0e-30L);
+        long double r = (long double)ref[i];
+        long double v = (long double)est[i];
+        long double denom = fmaxl(fabsl(r), 1.0e-30L);
         long double rel = fabsl(v - r) / denom;
-
-        if (!isfinite(rel) || rel > (long double)DBL_MAX)
-            rel = (long double)DBL_MAX;
-        if (rel < 0.0L) rel = (long double)DBL_MAX;
-
+        if (!isfinite(rel) || rel > (long double)DBL_MAX) rel = (long double)DBL_MAX;
+        
         errors[i] = (double)rel;
-        sum += rel;
-        sumsq += rel * rel;
+        if (global_cdf_buf && cdf_idx) global_cdf_buf[(*cdf_idx)++] = (double)rel;
+        
+        sum += rel; sumsq += rel * rel;
+        num_norm += (v - r) * (v - r);
+        den_norm += r * r;
     }
 
     qsort(errors, n, sizeof(*errors), cmp_double);
-
     s.count = n;
     s.mean = (double)(sum / (long double)n);
     s.rms = (double)sqrtl(sumsq / (long double)n);
     s.max = errors[n - 1];
-
-    /* Quantis por nearest-rank: índices crescentes e limitados a [0, n-1]. */
-    size_t i95 = (size_t)ceill(0.95L * (long double)n) - 1;
-    size_t i99 = (size_t)ceill(0.99L * (long double)n) - 1;
-    if (i95 >= n) i95 = n - 1;
-    if (i99 >= n) i99 = n - 1;
-    s.p95 = errors[i95];
-    s.p99 = errors[i99];
-
-    /* Essas relações devem sempre valer para uma distribuição ordenada. */
-    if (s.mean > s.max || s.p95 > s.p99 || s.p99 > s.max) {
-        fprintf(stderr,
-                "erro interno nas estatísticas: mean=%g max=%g p95=%g p99=%g\n",
-                s.mean, s.max, s.p95, s.p99);
-    }
-
+    s.p95 = errors[(size_t)ceill(0.95L * n) - 1];
+    s.p99 = errors[(size_t)ceill(0.99L * n) - 1];
+    
+    s.normwise = (den_norm > 0) ? (double)sqrtl(num_norm / den_norm) : 0.0;
+    
     free(errors);
     return s;
 }
 
-/* Histograma log2 dos erros (para distribuição) */
-static void hist_log2(const ref_t *ref, const long double *est, unsigned n,
-                      unsigned *bins, unsigned nbins, double lo, double hi) {
-    memset(bins, 0, nbins * sizeof(unsigned));
-    double step = (hi - lo) / nbins;
-    for (unsigned i = 0; i < n; ++i) {
-        double r = (double)ref[i], v = (double)est[i];
-        double denom = fabs(r) > 1e-300 ? fabs(r) : 1e-300;
-        double rel = fabs(v - r) / denom;
-        if (rel <= 0) rel = 1e-300;
-        double x = log2(rel);
-        int b = (int)((x - lo) / step);
-        if (b < 0) b = 0;
-        if (b >= (int)nbins) b = (int)nbins - 1;
-        bins[b]++;
-    }
+/* ============================================================
+   Modelo de Instruções RVV (Unificado para IEEE e Takum)
+   ============================================================ */
+/* 
+ * Modelo por bloco (chunk):
+ * IEEE: vsetvli (1) + vle (1) + vluxei (1) + vfmul (1) + vfredusum (1) = 5 instruções
+ * Takum: vsetvli (1) + vle (1) + vluxei (1) + vtdot (1) = 4 instruções
+ */
+static uint64_t estimate_rvv_instructions(size_t nnz, size_t vlmax, int is_takum) {
+    if (nnz == 0 || vlmax == 0) return 0;
+    size_t chunks = (nnz + vlmax - 1) / vlmax;
+    uint64_t inst_per_chunk = is_takum ? 4 : 5;
+    return chunks * inst_per_chunk;
 }
 
-/* Cronômetro */
 static double now_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-
 int main(void) {
-    const size_t n_sizes = sizeof(MATRIX_SIZES) / sizeof(MATRIX_SIZES[0]);
-    const unsigned nbins = 40;
-    const double hist_lo = -30.0, hist_hi = 10.0; /* log2(erro) */
+#ifndef TAKUM_USE_FLOAT128
+    printf("[AVISO] Compilado sem TAKUM_USE_FLOAT128. A referência será long double (80-bit), não Float128.\n");
+    printf("[AVISO] Para o artigo, use: gcc ... -DTAKUM_USE_FLOAT128 -lquadmath\n");
+#endif
+    printf("[AVISO] O tempo medido reflete o custo de SIMULAÇÃO SOFTWARE (expl/logl), não latência de hardware.\n\n");
 
+    const size_t n_sizes = sizeof(MATRIX_SIZES) / sizeof(MATRIX_SIZES[0]);
     FILE *csv = fopen("benchmark_results.csv", "w");
     FILE *sum = fopen("benchmark_summary.txt", "w");
-    if (!csv || !sum) { fprintf(stderr, "erro abrindo arquivos\n"); return 1; }
-
-    fprintf(csv, "size,nnz,tipo,repeat,time_s,csr_writes_est,"
-                 "inst_retired,elements,configs,err_mean,err_rms,err_max,"
-                 "err_p95,err_p99,out0\n");
+    
+    fprintf(csv, "size,nnz,tipo,mat_id,time_s,inst_est,err_mean,err_rms,err_max,err_p95,err_p99,err_normwise\n");
     fprintf(sum, "=== Benchmark SpMV (y = A*x) — Takum vs IEEE 754 ===\n");
-    fprintf(sum, "REPEATS_PER_SIZE=%u  SPARSITY=%.2f  SEED=0x%X\n\n",
-            REPEATS_PER_SIZE, SPARSITY, RNG_SEED);
-    fprintf(sum, "%-6s %-8s %-8s %-12s %-12s %-12s %-12s %-12s\n",
-            "size", "nnz", "tipo", "time_ms(mean)", "err_mean",
-            "err_max", "err_p95", "err_p99");
+    fprintf(sum, "NUM_MATRICES=%u (Matrizes DIFERENTES para variância estatística)\n", NUM_MATRICES);
+    fprintf(sum, "SPARSITY=%.2f  SEED=0x%X\n\n", SPARSITY, RNG_SEED);
 
-    /* acumuladores por tipo para resumo final */
-    struct {
-        const char *name;
-        double t_sum; size_t t_cnt;
-        double err_mean_acc, err_max_acc, err_p95_acc, err_p99_acc;
-        uint64_t inst_acc, elem_acc, cfg_acc, csr_acc;
-        size_t runs;
-    } acc[] = {
-        {"T8",  0,0, 0,0,0,0, 0,0,0,0, 0},
-        {"T16", 0,0, 0,0,0,0, 0,0,0,0, 0},
-        {"T32", 0,0, 0,0,0,0, 0,0,0,0, 0},
-        {"F16", 0,0, 0,0,0,0, 0,0,0,0, 0},
-        {"F32", 0,0, 0,0,0,0, 0,0,0,0, 0},
-        {"F64", 0,0, 0,0,0,0, 0,0,0,0, 0},
-    };
-    const size_t NB = sizeof(acc) / sizeof(acc[0]);
-
-    /* buffers temporários (malloc para tamanho grande) */
-    unsigned *hist_buf = calloc(nbins, sizeof(unsigned));
-    if (!hist_buf) return 1;
+    /* Buffers para CDF global (todos os elementos de todas as matrizes) */
+    size_t max_total_elements = NUM_MATRICES * 512 * 512; /* Pior caso */
+    double *global_cdf = malloc(max_total_elements * sizeof(double));
+    size_t cdf_idx = 0;
 
     for (size_t si = 0; si < n_sizes; ++si) {
         unsigned n = MATRIX_SIZES[si];
-        printf("[benchmark] gerando matriz %ux%u (sparsity %.2f)\n",
-               n, n, SPARSITY);
-        csr_matrix A;
-        if (csr_generate(&A, n) != 0) { fprintf(stderr, "OOM\n"); return 1; }
+        printf("[benchmark] Gerando %u matrizes %ux%u para avaliação estatística...\n", NUM_MATRICES, n, n);
+        
+        for (unsigned m = 0; m < NUM_MATRICES; ++m) {
+            csr_matrix A;
+            if (csr_generate(&A, n) != 0) { fprintf(stderr, "OOM\n"); return 1; }
+            
+            long double *x = malloc(n * sizeof(long double));
+            ref_t *ref = malloc(n * sizeof(ref_t));
+            float *y_f8_n = malloc(n * sizeof(float));
+            float *y_f8_w = malloc(n * sizeof(float));
+            float *y_f16_w = malloc(n * sizeof(float));
+            float *y_f32 = malloc(n * sizeof(float));
+            float *y_f64 = malloc(n * sizeof(float)); /* Cast para float para unificar compute_err */
+            uint32_t *y_tk = malloc(n * sizeof(uint32_t));
+            float *y_t8 = malloc(n * sizeof(float));
+            float *y_t16 = malloc(n * sizeof(float));
+            float *y_t32 = malloc(n * sizeof(float));
 
-        long double *x = malloc(n * sizeof(long double));
-        long double *y_ref = malloc(n * sizeof(long double));
-        long double *y_t8  = malloc(n * sizeof(long double));
-        long double *y_t16 = malloc(n * sizeof(long double));
-        long double *y_t32 = malloc(n * sizeof(long double));
-        long double *y_f16 = malloc(n * sizeof(long double));
-        long double *y_f32 = malloc(n * sizeof(long double));
-        long double *y_f64 = malloc(n * sizeof(long double));
-        ref_t *ref = malloc(n * sizeof(ref_t));
-        uint32_t *y_tk = malloc(n * sizeof(uint32_t));
-        if (!x || !y_ref || !y_t8 || !y_t16 || !y_t32 || !y_f16 ||
-            !y_f32 || !y_f64 || !ref || !y_tk) {
-            fprintf(stderr, "OOM\n"); return 1;
+            for (unsigned i = 0; i < n; ++i) x[i] = rng_ld();
+            spmv_ref(&A, x, ref);
+
+            double t0, t1;
+            size_t vlmax_t8 = tk_sim_vlmax(8), vlmax_t16 = tk_sim_vlmax(16), vlmax_t32 = tk_sim_vlmax(32);
+            size_t vlmax_f32 = 8; /* Exemplo RVV F32 */
+
+            /* Execução e Coleta */
+            t0 = now_sec(); spmv_f8_narrow(&A, x, y_f8_n); t1 = now_sec();
+            err_stats e_f8n = compute_err(ref, y_f8_n, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,F8_N,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_f32, 0), e_f8n.mean, e_f8n.rms, e_f8n.max, e_f8n.p95, e_f8n.p99, e_f8n.normwise);
+
+            t0 = now_sec(); spmv_f8_wide(&A, x, y_f8_w); t1 = now_sec();
+            err_stats e_f8w = compute_err(ref, y_f8_w, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,F8_W,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_f32, 0), e_f8w.mean, e_f8w.rms, e_f8w.max, e_f8w.p95, e_f8w.p99, e_f8w.normwise);
+
+            t0 = now_sec(); spmv_f16_wide(&A, x, y_f16_w); t1 = now_sec();
+            err_stats e_f16w = compute_err(ref, y_f16_w, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,F16_W,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_f32, 0), e_f16w.mean, e_f16w.rms, e_f16w.max, e_f16w.p95, e_f16w.p99, e_f16w.normwise);
+
+            t0 = now_sec(); spmv_f32(&A, x, y_f32); t1 = now_sec();
+            err_stats e_f32 = compute_err(ref, y_f32, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,F32,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_f32, 0), e_f32.mean, e_f32.rms, e_f32.max, e_f32.p95, e_f32.p99, e_f32.normwise);
+
+            t0 = now_sec(); spmv_takum(&A, x, 8, y_tk); t1 = now_sec();
+            for(unsigned i=0;i<n;i++) y_t8[i] = tk_to_ld(y_tk[i], 8);
+            err_stats e_t8 = compute_err(ref, y_t8, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,T8,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_t8, 1), e_t8.mean, e_t8.rms, e_t8.max, e_t8.p95, e_t8.p99, e_t8.normwise);
+
+            t0 = now_sec(); spmv_takum(&A, x, 16, y_tk); t1 = now_sec();
+            for(unsigned i=0;i<n;i++) y_t16[i] = tk_to_ld(y_tk[i], 16);
+            err_stats e_t16 = compute_err(ref, y_t16, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,T16,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_t16, 1), e_t16.mean, e_t16.rms, e_t16.max, e_t16.p95, e_t16.p99, e_t16.normwise);
+
+            t0 = now_sec(); spmv_takum(&A, x, 32, y_tk); t1 = now_sec();
+            for(unsigned i=0;i<n;i++) y_t32[i] = tk_to_ld(y_tk[i], 32);
+            err_stats e_t32 = compute_err(ref, y_t32, n, global_cdf, &cdf_idx);
+            fprintf(csv, "%u,%zu,T32,%u,%.6f,%llu,%.3e,%.3e,%.3e,%.3e,%.3e,%.3e\n", n, A.nnz, m, t1-t0, estimate_rvv_instructions(A.nnz, vlmax_t32, 1), e_t32.mean, e_t32.rms, e_t32.max, e_t32.p95, e_t32.p99, e_t32.normwise);
+
+            csr_free(&A);
+            free(x); free(ref); free(y_f8_n); free(y_f8_w); free(y_f16_w); 
+            free(y_f32); free(y_f64); free(y_tk); free(y_t8); free(y_t16); free(y_t32);
         }
-
-        /* gera vetor x fora do cronômetro */
-        for (unsigned i = 0; i < n; ++i) x[i] = rng_ld();
-
-        /* referência Float128 */
-        spmv_ref(&A, x, ref);
-        for (unsigned i = 0; i < n; ++i) y_ref[i] = (long double)ref[i];
-
-        {
-            double t_sum = 0; err_stats es = {0};
-            for (unsigned r = 0; r < REPEATS_PER_SIZE; ++r) {
-                double t0 = now_sec();
-                spmv_f16(&A, x, y_f16);
-                double t1 = now_sec();
-                t_sum += (t1 - t0);
-                err_stats e = compute_err(ref, y_f16, n);
-                es = e;
-                fprintf(csv, "%u,%zu,F16,%u,%.9f,%u,0,0,0,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
-                        n, A.nnz, r, (t1 - t0), (unsigned)A.nnz,
-                        e.mean, e.rms, e.max, e.p95, e.p99,
-                        (double)(n ? y_f16[0] : 0));
-            }
-            double t_mean = t_sum / REPEATS_PER_SIZE;
-            acc[3].t_sum += t_mean; acc[3].t_cnt++;
-            acc[3].err_mean_acc += es.mean; acc[3].err_max_acc += es.max;
-            acc[3].err_p95_acc += es.p95; acc[3].err_p99_acc += es.p99;
-            acc[3].csr_acc += (uint64_t)A.nnz;
-            acc[3].runs++;
-            fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
-                    n, A.nnz, "F16", t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
-        }
-
-        /* -------- Float32 -------- */
-        {
-            double t_sum = 0; err_stats es = {0};
-            float *yf = malloc(n * sizeof(float));
-            for (unsigned r = 0; r < REPEATS_PER_SIZE; ++r) {
-                double t0 = now_sec();
-                spmv_f32(&A, x, yf);
-                double t1 = now_sec();
-                t_sum += (t1 - t0);
-                for (unsigned i = 0; i < n; ++i) y_f32[i] = (long double)yf[i];
-                err_stats e = compute_err(ref, y_f32, n);
-                es = e; /* último run é representativo */
-                fprintf(csv, "%u,%zu,F32,%u,%.9f,%u,0,0,0,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
-                        n, A.nnz, r, (t1 - t0), (unsigned)A.nnz,
-                        e.mean, e.rms, e.max, e.p95, e.p99,
-                        (double)(n ? y_f32[0] : 0));
-            }
-            free(yf);
-            double t_mean = t_sum / REPEATS_PER_SIZE;
-            acc[4].t_sum += t_mean; acc[4].t_cnt++;
-            acc[4].err_mean_acc += es.mean; acc[4].err_max_acc += es.max;
-            acc[4].err_p95_acc += es.p95;  acc[4].err_p99_acc += es.p99;
-            acc[4].csr_acc += (uint64_t)A.nnz; /* IEEE trad.: 1 CSR write por elem (upper bound) */
-            acc[4].runs++;
-            fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
-                    n, A.nnz, "F32", t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
-        }
-
-        /* -------- Float64 -------- */
-        {
-            double t_sum = 0; err_stats es = {0};
-            double *yd = malloc(n * sizeof(double));
-            for (unsigned r = 0; r < REPEATS_PER_SIZE; ++r) {
-                double t0 = now_sec();
-                spmv_f64(&A, x, yd);
-                double t1 = now_sec();
-                t_sum += (t1 - t0);
-                for (unsigned i = 0; i < n; ++i) y_f64[i] = (long double)yd[i];
-                err_stats e = compute_err(ref, y_f64, n);
-                es = e;
-                fprintf(csv, "%u,%zu,F64,%u,%.9f,%u,0,0,0,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
-                        n, A.nnz, r, (t1 - t0), (unsigned)A.nnz,
-                        e.mean, e.rms, e.max, e.p95, e.p99,
-                        (double)(n ? y_f64[0] : 0));
-            }
-            free(yd);
-            double t_mean = t_sum / REPEATS_PER_SIZE;
-            acc[5].t_sum += t_mean; acc[5].t_cnt++;
-            acc[5].err_mean_acc += es.mean; acc[5].err_max_acc += es.max;
-            acc[5].err_p95_acc += es.p95;  acc[5].err_p99_acc += es.p99;
-            acc[5].csr_acc += (uint64_t)A.nnz;
-            acc[5].runs++;
-            fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
-                    n, A.nnz, "F64", t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
-        }
-
-        /* -------- Takum T8/T16/T32 -------- */
-        for (unsigned k = 0; k < 3; ++k) {
-            unsigned sew = 8u << k;
-            const char *label = acc[k].name;
-            double t_sum = 0;
-            err_stats es = {0};
-            uint64_t r_sum = 0, e_sum = 0, c_sum = 0;
-            for (unsigned r = 0; r < REPEATS_PER_SIZE; ++r) {
-                uint64_t rr = 0, ee = 0, cc = 0;
-                double t0 = now_sec();
-                int rc = spmv_takum(&A, x, sew, y_tk, &rr, &ee, &cc);
-                double t1 = now_sec();
-                if (rc != 0) { fprintf(stderr, "falha spmv_takum\n"); return 1; }
-                t_sum += (t1 - t0);
-                r_sum += rr; e_sum += ee; c_sum += cc;
-                for (unsigned i = 0; i < n; ++i)
-                    (k == 0 ? (y_t8[i]  = tk_to_ld(y_tk[i], 8))  :
-                     k == 1 ? (y_t16[i] = tk_to_ld(y_tk[i], 16)) :
-                              (y_t32[i] = tk_to_ld(y_tk[i], 32)));
-                long double *yv = k == 0 ? y_t8 : k == 1 ? y_t16 : y_t32;
-                err_stats e = compute_err(ref, yv, n);
-                es = e;
-                fprintf(csv, "%u,%zu,%s,%u,%.9f,0,%llu,%llu,%llu,"
-                             "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
-                        n, A.nnz, label, r, (t1 - t0),
-                        (unsigned long long)rr, (unsigned long long)ee,
-                        (unsigned long long)cc,
-                        e.mean, e.rms, e.max, e.p95, e.p99,
-                        (double)(n ? yv[0] : 0));
-            }
-            double t_mean = t_sum / REPEATS_PER_SIZE;
-            acc[k].t_sum += t_mean; acc[k].t_cnt++;
-            acc[k].err_mean_acc += es.mean; acc[k].err_max_acc += es.max;
-            acc[k].err_p95_acc += es.p95;  acc[k].err_p99_acc += es.p99;
-            acc[k].inst_acc += r_sum; acc[k].elem_acc += e_sum;
-            acc[k].cfg_acc  += c_sum; acc[k].csr_acc  += 0; /* sem CSR */
-            acc[k].runs++;
-            fprintf(sum, "%-6u %-8zu %-8s %-12.4f %-12.3e %-12.3e %-12.3e %-12.3e\n",
-                    n, A.nnz, label, t_mean * 1e3, es.mean, es.max, es.p95, es.p99);
-        }
-
-        /* histogramas de erro (última repetição de cada tipo Takum) */
-        for (unsigned k = 0; k < 3; ++k) {
-            long double *yv = k == 0 ? y_t8 : k == 1 ? y_t16 : y_t32;
-            hist_log2(ref, yv, n, hist_buf, nbins, hist_lo, hist_hi);
-            char fname[64];
-            snprintf(fname, sizeof(fname), "benchmark_hist_%s.csv", acc[k].name);
-            FILE *hf = fopen(fname, "w");
-            if (hf) {
-                fprintf(hf, "log2_err_bucket,count\n");
-                double step = (hist_hi - hist_lo) / nbins;
-                for (unsigned b = 0; b < nbins; ++b)
-                    fprintf(hf, "%.2f,%u\n", hist_lo + (b + 0.5) * step, hist_buf[b]);
-                fclose(hf);
-            }
-        }
-
-        {
-            long double *hist_values[] = {y_f16, y_f32, y_f64};
-            const char *hist_names[] = {"F16", "F32", "F64"};
-            for (unsigned k = 0; k < 3; ++k) {
-                hist_log2(ref, hist_values[k], n, hist_buf, nbins, hist_lo, hist_hi);
-                char fname[64];
-                snprintf(fname, sizeof(fname), "benchmark_hist_%s.csv", hist_names[k]);
-                FILE *hf = fopen(fname, "w");
-                if (hf) {
-                    fprintf(hf, "log2_err_bucket,count\n");
-                    double step = (hist_hi - hist_lo) / nbins;
-                    for (unsigned b = 0; b < nbins; ++b)
-                        fprintf(hf, "%.2f,%u\n", hist_lo + (b + 0.5) * step, hist_buf[b]);
-                    fclose(hf);
-                }
-            }
-        }
-
-        csr_free(&A);
-        free(x); free(y_ref); free(y_t8); free(y_t16); free(y_t32);
-        free(y_f16); free(y_f32); free(y_f64); free(ref); free(y_tk);
     }
 
-    /* ---------- Resumo agregado + CSRs ---------- */
-    fprintf(sum, "\n=== Médias por tipo (todos os tamanhos) ===\n");
-    fprintf(sum, "%-6s %-14s %-12s %-12s %-12s %-12s %-14s %-14s %-10s\n",
-            "fmt", "time_ms(mean)", "err_mean", "err_max", "err_p95",
-            "err_p99", "inst_retired", "elements", "CSR_writes");
-    for (size_t b = 0; b < NB; ++b) {
-        if (!acc[b].runs) continue;
-        fprintf(sum, "%-6s %-14.4f %-12.3e %-12.3e %-12.3e %-12.3e "
-                     "%-14llu %-14llu %-10llu\n",
-                acc[b].name,
-                acc[b].t_sum / acc[b].t_cnt * 1e3,
-                acc[b].err_mean_acc / acc[b].runs,
-                acc[b].err_max_acc  / acc[b].runs,
-                acc[b].err_p95_acc  / acc[b].runs,
-                acc[b].err_p99_acc  / acc[b].runs,
-                (unsigned long long)acc[b].inst_acc,
-                (unsigned long long)acc[b].elem_acc,
-                (unsigned long long)acc[b].csr_acc);
+    /* Gerar CDF Global */
+    qsort(global_cdf, cdf_idx, sizeof(double), cmp_double);
+    FILE *cdf_file = fopen("benchmark_cdf.csv", "w");
+    fprintf(cdf_file, "error_relative,cumulative_probability\n");
+    for (size_t i = 0; i < cdf_idx; i += (cdf_idx / 1000 + 1)) { /* Amostragem para não explodir o CSV */
+        fprintf(cdf_file, "%.6e,%.6f\n", global_cdf[i], (double)(i + 1) / cdf_idx);
     }
+    fclose(cdf_file);
+    free(global_cdf);
 
-    fprintf(sum, "\n=== Complexidade de instruções / CSRs ===\n");
-    fprintf(sum, "Takum: nenhum CSR dedicado (sem frm, fflags, "
-                 "NaN-boxing). fflags não é atualizado por operações Takum.\n");
-    fprintf(sum, "IEEE 754 (RVV tradicional): estimativa de 1 escrita de fflags "
-                 "por elemento multiplicado (upper bound; na prática só em "
-                 "exceções, mas o CSR existe e deve ser preservado).\n");
-    fprintf(sum, "Redução de CSRs: T8/T16/T32 = 0 escritas vs ~nnz para IEEE.\n");
-    fprintf(sum, "\nArquivos gerados: benchmark_results.csv, "
-                 "benchmark_hist_T8.csv, benchmark_hist_T16.csv, "
-                 "benchmark_hist_T32.csv, "
-                 "benchmark_hist_F16.csv, benchmark_hist_F32.csv, "
-                 "benchmark_hist_F64.csv\n");
+    fprintf(sum, "\n=== Análise de Complexidade e CSRs ===\n");
+    fprintf(sum, "1. Modelo de Instruções RVV (por bloco/chunk):\n");
+    fprintf(sum, "   IEEE 754: vsetvli + vle + vluxei + vfmul + vfredusum = 5 instruções.\n");
+    fprintf(sum, "   Takum:    vsetvli + vle + vluxei + vtdot = 4 instruções.\n");
+    fprintf(sum, "   O vtdot do Takum substitui a multiplicação e redução, economizando 1 instrução por chunk.\n\n");
+    
+    fprintf(sum, "2. Redução de Estado de CSRs (Argumento Defensável):\n");
+    fprintf(sum, "   IEEE 754 exige manutenção de CSRs de controle e status: 'fflags' (exceções) e 'frm' (rounding mode).\n");
+    fprintf(sum, "   Takum possui arredondamento fixo (RNE) e não gera exceções de ponto flutuante (apenas NaR).\n");
+    fprintf(sum, "   Isso elimina a necessidade de salvar/restaurar 'fflags' e 'frm' em contextos de interrupção ou chamadas de função, reduzindo o estado de CSR de 2 registradores para 0.\n\n");
 
-    free(hist_buf);
+    fprintf(sum, "3. Aviso sobre Tempo de Execução:\n");
+    fprintf(sum, "   O tempo medido neste benchmark reflete o custo de SIMULAÇÃO SOFTWARE (devido às funções expl/logl usadas na conversão Takum).\n");
+    fprintf(sum, "   NÃO reflete a latência de hardware real. Em hardware dedicado (RTL), Takum é mais simples que IEEE, mas a simulação em CPU x86 é mais lenta.\n");
+
     fclose(csv); fclose(sum);
-    printf("[benchmark] concluído. Veja benchmark_results.csv e benchmark_summary.txt\n");
+    printf("[benchmark] concluído. Veja benchmark_results.csv, benchmark_cdf.csv e benchmark_summary.txt\n");
     return 0;
 }

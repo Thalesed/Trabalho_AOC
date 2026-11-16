@@ -7,6 +7,7 @@ ifeq ($(USE_FLOAT128),1)
 CPPFLAGS += -DTAKUM_USE_FLOAT128
 LDLIBS += -lquadmath
 endif
+
 BUILD := build
 CORE := Takum.c src/rvv_takum.c
 HEADERS := takum.h src/rvv_takum.h src/tk_wide.h
@@ -14,11 +15,10 @@ LIBTAKUM ?= ../reference-libtakum
 
 BENCH_DIR := benchmark
 BENCH_SRC := $(BENCH_DIR)/benchmark.c
+
 BENCH_OUT := $(BENCH_DIR)/benchmark_results.csv \
              $(BENCH_DIR)/benchmark_summary.txt \
-             $(BENCH_DIR)/benchmark_hist_T8.csv \
-             $(BENCH_DIR)/benchmark_hist_T16.csv \
-             $(BENCH_DIR)/benchmark_hist_T32.csv
+             $(BENCH_DIR)/benchmark_cdf.csv
 
 .PHONY: all demo test sanitize oracle precision bench benchmark figs clean-benchmark clean
 
@@ -68,7 +68,6 @@ benchmark: $(BUILD)/benchmark
 	cd $(BENCH_DIR) && ../$(BUILD)/benchmark
 	@echo "==> saídas geradas:"
 	@ls -1 $(BENCH_OUT) 2>/dev/null || true
-
 
 figs: benchmark
 	python3 benchmark.py --dir $(BENCH_DIR) --figdir figures
