@@ -20,7 +20,7 @@
 /* ============================================================
    Configuração
    ============================================================ */
-static const unsigned NUM_MATRICES   = 20;   /* matrizes DIFERENTES por tamanho */
+static const unsigned NUM_MATRICES   = 30;   /* matrizes DIFERENTES por tamanho */
 static const unsigned MATRIX_SIZES[] = {64, 128, 256, 512};
 #define SPARSITY   0.90
 #define RNG_SEED   0xDEADBEEFu
