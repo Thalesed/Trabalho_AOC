@@ -25,8 +25,9 @@ static const unsigned MATRIX_SIZES[] = {64, 128, 256, 512};
 #define SPARSITY   0.90
 #define RNG_SEED   0xDEADBEEFu
 
+#define TK_VLEN_BYTES 16u
 /* Registrador vetorial de 128 bits (RVV padrão) → VL por formato */
-#define RVV_VLEN_BITS 128u
+#define RVV_VLEN_BITS (TK_VLEN_BYTES * 8u)   
 static size_t vl_for_bits(unsigned elem_bits) {
     return RVV_VLEN_BITS / elem_bits;
 }
@@ -315,11 +316,12 @@ static void spmv_f32(const csr_matrix *A, const long double *x, float *y) {
 /* F16 narrow: produto quantizado em half, acumulador half (forçado por quantização a cada soma) */
 static void spmv_f16_narrow(const csr_matrix *A, const long double *x, float *y) {
     for (unsigned i = 0; i < A->n; ++i) {
-        float s = 0.f;
+        volatile float s = 0.f;   /* impede fusão q16(q16(...)) pelo -O2 */
         for (uint32_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k) {
             float a = q16((float)A->vals[k]);
             float b = q16((float)x[A->col_idx[k]]);
-            s = q16(q16(a * b) + s);   /* cada passo arredonda p/ half */
+            float prod = q16(a * b);
+            s = q16(prod + s);
         }
         y[i] = s;
     }
@@ -453,22 +455,27 @@ static int spmv_takum_twidth(const csr_matrix *A, const long double *x,
             tk_sim_setvl(&sim, 1, sew);
             tk_sim_load(&sim, 1, &a, 1);
             tk_sim_load(&sim, 2, &b, 1);
-            uint32_t insn_mul = tk_instruction(TK_VTMUL, 3, 1, 2);
+                        uint32_t insn_mul = tk_instruction(TK_VTMUL, 3, 1, 2);
             tk_sim_execute(&sim, insn_mul);
 
-            /* Lê o produto da saída pública do simulador (dot_accumulator) */
-            long double prod = sim.dot_accumulator;
+            /* Lê o produto de v[3] via API pública (VTADD/VTMUL não tocam dot_accumulator) */
+            uint32_t prod_word = 0;
+            tk_sim_read(&sim, 3, sew, 0, &prod_word);
+            long double prod = tk_to_ld(prod_word, sew);
 
-            /* vtadd: 1 lane, v3 <- acc + prod (arredonda para T-width) */
+            /* vtadd: acc_t + prod, um lane */
             long double acc_ld = tk_to_ld(acc_t, sew);
             long double sum_ld = acc_ld + prod;
             tk_sim_setvl(&sim, 1, sew);
             tk_sim_load(&sim, 1, &sum_ld, 1);
-            tk_sim_load(&sim, 2, &sum_ld, 1);
+            tk_sim_load(&sim, 2, &sum_ld, 1);   /* placeholder; sobrescrito abaixo */
+            /* Carrega acc_ld e prod_ld nas lanes 1 e 2, não sum_ld duas vezes */
+            tk_sim_load(&sim, 1, &acc_ld, 1);
+            tk_sim_load(&sim, 2, &prod, 1);
             uint32_t insn_add = tk_instruction(TK_VTADD, 3, 1, 2);
             tk_sim_execute(&sim, insn_add);
 
-            acc_t = tk_from_ld(sim.dot_accumulator, sew);
+            tk_sim_read(&sim, 3, sew, 0, &acc_t);
         }
         y_out[i] = acc_t;
     }
