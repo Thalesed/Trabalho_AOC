@@ -25,7 +25,7 @@ static const unsigned MATRIX_SIZES[] = {64, 128, 256, 512};
 #define SPARSITY   0.90
 #define RNG_SEED   0xDEADBEEFu
 
-#define TK_VLEN_BYTES 16u
+
 /* Registrador vetorial de 128 bits (RVV padrão) → VL por formato */
 #define RVV_VLEN_BITS (TK_VLEN_BYTES * 8u)   
 static size_t vl_for_bits(unsigned elem_bits) {
