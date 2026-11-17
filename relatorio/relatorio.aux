@@ -1,0 +1,85 @@
+\relax 
+\providecommand \babel@aux [2]{\global \let \babel@toc \@gobbletwo }
+\@nameuse{bbl@beforestart}
+\catcode `"\active 
+\citation{ieee754}
+\citation{hunhold2025avx}
+\citation{gustafson2017}
+\citation{hunhold2024beating,hunhold2025avx}
+\citation{hunhold2025avx}
+\citation{hunhold2024beating}
+\citation{hunhold2024codec,hunhold2025avx}
+\citation{hunhold2025avx}
+\citation{rvv}
+\citation{libtakum}
+\citation{gustafson2017}
+\citation{hunhold2024beating}
+\citation{hunhold2024beating}
+\babel@aux{brazilian}{}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introdução}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {II}Fundamentação Teórica e Trabalhos Relacionados}{1}{}\protected@file@percent }
+\newlabel{sec:fund}{{II}{1}{}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-A}}Posits}{1}{}\protected@file@percent }
+\citation{hunhold2024beating,hunhold2024codec}
+\citation{hunhold2024beating}
+\citation{hunhold2024beating}
+\citation{hunhold2024beating}
+\citation{hunhold2024beating}
+\citation{hunhold2024beating}
+\citation{libtakum}
+\citation{hunhold2024codec}
+\citation{hunhold2025avx}
+\citation{rvv}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-B}}Codificação Takum}{2}{}\protected@file@percent }
+\newlabel{eq:r}{{1}{2}{}{equation.1}{}}
+\newlabel{eq:c}{{2}{2}{}{equation.2}{}}
+\newlabel{eq:p}{{3}{2}{}{equation.3}{}}
+\newlabel{eq:l}{{4}{2}{}{equation.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-C}}Arredondamento}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-D}}Takum linear e codec em hardware}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-E}}Extensões SIMD, formatos de baixa precisão e CSRs}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {III}Metodologia e Arquitetura Proposta}{2}{}\protected@file@percent }
+\newlabel{sec:metodo}{{III}{2}{}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-A}}Decodificação}{2}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Bits de mantissa $p$ por largura de palavra}}{3}{}\protected@file@percent }
+\newlabel{tab:p}{{I}{3}{}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Codificação e arredondamento}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-C}}Operações aritméticas}{3}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Instruções vetoriais implementadas na proposta Zvtakum}}{3}{}\protected@file@percent }
+\newlabel{tab:isa}{{II}{3}{}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-D}}Simulador vetorial}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-E}}Metodologia de verificação}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-F}}Metodologia de avaliação experimental (Benchmark SpMV)}{4}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Resultados da verificação funcional e diferencial}}{4}{}\protected@file@percent }
+\newlabel{tab:verif}{{III}{4}{}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Saída da demonstração vetorial (valores decodificados)}}{4}{}\protected@file@percent }
+\newlabel{tab:demo}{{IV}{4}{}{table.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {IV}Resultados e Discussão}{4}{}\protected@file@percent }
+\newlabel{sec:result}{{IV}{4}{}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Verificação funcional e diferencial}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Demonstração vetorial}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Precisão numérica na multiplicação matriz-vetor esparsa}{4}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Resumo de erro relativo (vs.\ Float128) e instruções RVV no benchmark SpMV (120 matrizes, esparsidade de 90\%)}}{5}{}\protected@file@percent }
+\newlabel{tab:spmv_summary}{{V}{5}{}{table.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {VI}{\ignorespaces Erro relativo normwise médio e instruções RVV por dimensão $n$}}{5}{}\protected@file@percent }
+\newlabel{tab:spmv_by_size}{{VI}{5}{}{table.6}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Função de distribuição acumulada (CDF) empírica do erro relativo por elemento em relação à referência Float128 para $n=512$ (30 matrizes).}}{5}{}\protected@file@percent }
+\newlabel{fig:cdf}{{1}{5}{}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Evolução do erro relativo \emph  {normwise} médio com a dimensão da matriz $n$.}}{5}{}\protected@file@percent }
+\newlabel{fig:normwise}{{2}{5}{}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Complexidade de instruções vetoriais e estado de CSRs}{5}{}\protected@file@percent }
+\citation{hunhold2024beating}
+\bibcite{hunhold2024beating}{1}
+\bibcite{hunhold2024codec}{2}
+\bibcite{hunhold2025avx}{3}
+\bibcite{libtakum}{4}
+\bibcite{gustafson2017}{5}
+\bibcite{ieee754}{6}
+\bibcite{rvv}{7}
+\@writefile{lot}{\contentsline {table}{\numberline {VII}{\ignorespaces Comparação arquitetural e de CSRs: IEEE~754 vs.\ Takum-RVV}}{6}{}\protected@file@percent }
+\newlabel{tab:csr}{{VII}{6}{}{table.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Discussão e limitações}{6}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {V}Conclusão}{6}{}\protected@file@percent }
+\newlabel{sec:concl}{{V}{6}{}{section.5}{}}
+\@writefile{toc}{\contentsline {section}{Refer\^encias}{6}{}\protected@file@percent }
+\gdef \@abspage@last{6}

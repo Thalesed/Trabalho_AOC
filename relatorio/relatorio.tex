@@ -1,0 +1,842 @@
+%% Relatorio Final (Fases 1 a 3) -- baseado em bare_jrnl.tex (IEEEtran.cls V1.8b+)
+\documentclass[journal]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage{cite}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{url}
+
+\renewcommand{\IEEEkeywordsname}{Palavras-chave}
+
+\begin{document}
+
+\title{Takum-RVV: Modelo Funcional e Avaliação da Aritmética Takum
+Logarítmica T8/T16/T32 em RISC-V Vetorial}
+
+\author{Lucas Pimenta Braga - 2023034552,
+        Bernardo Soares Diniz Lara - 2023060898,
+        Thales Eduardo - 2024022647,
+        Pietro Diniz C. Ferreira - 2024056061 e
+        Cauê Rodrigues Campos - 2022087890
+\thanks{Trabalho Prático de Arquitetura e Organização de Computadores (AOC), 2026/2.}}
+
+\markboth{AOC 2026/2 -- Trabalho Prático}%
+{Takum-RVV: Modelo Funcional e Avaliação da Aritmética Takum T8/T16/T32}
+
+\maketitle
+
+\begin{abstract}
+Este relatório descreve o projeto, a verificação e a avaliação experimental
+da aritmética Takum aplicada a uma extensão vetorial do RISC-V (Takum-RVV).
+Foi implementado, em C11, um modelo funcional do formato Takum logarítmico
+para palavras de 8, 16 e 32 bits (T8, T16 e T32), com extração dos campos de
+sinal, direção, regime, característica e mantissa, codificação com
+arredondamento ao mais próximo e saturação, soma, subtração, multiplicação e
+conversão entre larguras. Sobre esse núcleo foi construído um simulador de
+cinco instruções vetoriais customizadas (\texttt{vtadd.vv}, \texttt{vtsub.vv},
+\texttt{vtmul.vv}, \texttt{vtdot.vv} e \texttt{vncvt.t.t}), com 32
+registradores de 256 bits e controle de SEW e VL. A implementação foi
+verificada sobre todas as palavras T8 e T16, por amostragem em T32, por
+referência independente em precisão quádrupla e por comparação diferencial
+com a libtakum (1\,262\,177 comparações exatas de palavras e 165\,792
+decodificações com erro relativo inferior a $3\cdot 10^{-14}$). Na avaliação
+experimental de multiplicação de matriz esparsa por vetor ($y = A\cdot x$,
+CSR com 90\% de esparsidade, $n \in \{64, 128, 256, 512\}$, 30 matrizes por
+dimensão) frente a \texttt{\_\_float128}, T8, T16 (com \texttt{vtdot.vv} e
+acumulação em 16 bits, T16W) e T32 superaram os formatos IEEE~754/OFP8
+(E4M3, E5M2, FP16 e FP32) em precisão por largura, com redução de 20\% nas
+instruções vetoriais por bloco via \texttt{vtdot.vv} e eliminação dos CSRs
+\texttt{frm} e \texttt{fflags}.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Takum, aritmética de computadores, sistema numérico logarítmico, RISC-V,
+extensão vetorial, multiplicação matriz-vetor esparsa, simulação funcional.
+\end{IEEEkeywords}
+
+\IEEEpeerreviewmaketitle
+
+% ---------------------------------------------------------------------------
+\section{Introdução}
+
+\IEEEPARstart{O}{} padrão IEEE~754~\cite{ieee754} é a base da aritmética de
+ponto flutuante nos processadores atuais. Suas limitações levaram ao
+surgimento de formatos derivados de baixa precisão voltados para aprendizado
+de máquina, como IEEE~754 binary16 (FP16), bfloat16 e os formatos de 8 bits
+OFP8 (E4M3 e E5M2)~\cite{hunhold2025avx}, e de sistemas alternativos, como os
+\emph{posits}~\cite{gustafson2017} e, mais recentemente, os
+\emph{takums}~\cite{hunhold2024beating,hunhold2025avx}. A proliferação de
+formatos baseados no IEEE~754 introduz inconsistências no tratamento de
+exceções e sobrecarga na lógica de decodificação em hardware~\cite{hunhold2025avx}.
+O takum, por sua vez, é um formato logarítmico de precisão afunilada
+(\emph{tapered precision}) cuja faixa dinâmica é assintoticamente constante em
+relação ao número de bits~\cite{hunhold2024beating}, quase toda disponível já
+em 8 bits, e cuja estrutura permite compartilhar um decodificador único que
+inspeciona no máximo os 12 bits mais significativos~\cite{hunhold2024codec,hunhold2025avx}.
+
+Hunhold~\cite{hunhold2025avx} propôs que a adoção de takums permitiria
+simplificar extensões SIMD como o Intel AVX10.2, substituindo vários
+formatos de ponto flutuante por uma única família ortogonal, denominada T8,
+T16, T32 e T64. Este trabalho investiga a mesma ideia no contexto da extensão
+vetorial do RISC-V (RVV)~\cite{rvv}, abrangendo desde a implementação da
+aritmética de base até a avaliação experimental em álgebra linear esparsa.
+
+O desenvolvimento foi dividido em três etapas integradas, cujas contribuições
+principais são:
+\begin{itemize}
+\item um codificador/decodificador Takum logarítmico em C11 para T8, T16 e
+T32, incluindo o tratamento de \emph{ghost bits} em T8, e operações escalares
+de soma, subtração, multiplicação e conversão de largura com arredondamento
+ao mais próximo (empate para par) e saturação;
+\item um simulador funcional de cinco instruções vetoriais customizadas
+(\texttt{vtadd.vv}, \texttt{vtsub.vv}, \texttt{vtmul.vv}, \texttt{vtdot.vv} e
+\texttt{vncvt.t.t}) sobre 32 registradores de 256 bits;
+\item uma bateria de verificação formal e diferencial com testes exaustivos em
+T8 e T16, referência independente em precisão quádrupla (\texttt{\_\_float128})
+e validação contra a biblioteca libtakum~\cite{libtakum};
+\item um \emph{benchmark} de multiplicação de matriz esparsa por vetor
+($y = A\cdot x$, SpMV) em formato CSR sobre 120 matrizes, comparando a
+distribuição do erro relativo (em relação a \texttt{\_\_float128}), a contagem
+de instruções RVV e o custo de registradores de controle e status (CSRs) entre
+a família Takum e os formatos IEEE~754/OFP8.
+\end{itemize}
+
+O restante do texto está organizado assim: a Seção~\ref{sec:fund} apresenta
+a fundamentação teórica e os trabalhos relacionados; a
+Seção~\ref{sec:metodo} descreve a metodologia e a arquitetura proposta; a
+Seção~\ref{sec:result} apresenta e discute os resultados de verificação e de
+avaliação experimental; e a Seção~\ref{sec:concl} conclui o relatório.
+
+% ---------------------------------------------------------------------------
+\section{Fundamentação Teórica e Trabalhos Relacionados}
+\label{sec:fund}
+
+\subsection{Posits}
+Os posits~\cite{gustafson2017} codificam parte do expoente em um regime de
+comprimento variável (codificação unária), seguido de bits de expoente e de
+fração; na versão padronizada, utilizam dois bits de expoente~\cite{hunhold2024beating}.
+Segundo Hunhold~\cite{hunhold2024beating}, essa codificação concentra muitos
+bits de mantissa para valores próximos de 1, mas o crescimento unário do
+regime consome rapidamente a palavra à medida que os valores se afastam da
+unidade, reduzindo a faixa dinâmica e dificultando a decodificação em hardware.
+Os takums foram propostos para superar essas limitações.
+
+\subsection{Codificação Takum}
+Seguindo a definição de Hunhold~\cite{hunhold2024beating,hunhold2024codec},
+uma palavra de $n$ bits é lida, do bit mais significativo para o menos
+significativo, como $(S, D, R, C, M)$, em que $S$ é o sinal, $D$ é a
+direção, $R=(R_2,R_1,R_0)$ é o regime de 3 bits, $C$ são os $r$ bits da
+característica e $M$ são os $p$ bits da mantissa. Tem-se
+\begin{align}
+r &= \begin{cases} 7 - \mathrm{uint}(R) & D = 0\\
+                   \mathrm{uint}(R)     & D = 1 \end{cases} \label{eq:r}\\
+c &= \begin{cases} -2^{r+1} + 1 + \mathrm{uint}(C) & D = 0\\
+                    2^{r} - 1 + \mathrm{uint}(C)    & D = 1 \end{cases} \label{eq:c}\\
+p &= n - r - 5, \qquad m = 2^{-p}\,\mathrm{uint}(M), \label{eq:p}\\
+\ell &= (-1)^S (c + m), \label{eq:l}
+\end{align}
+com $r \in \{0,\dots,7\}$, $c \in \{-255,\dots,254\}$,
+$p \in \{n-12,\dots,n-5\}$, $m \in [0,1)$ e $\ell \in (-255, 255)$.
+A palavra só com zeros representa 0, e a palavra com $S=1$ e os demais
+bits nulos representa NaR (\emph{Not a Real}). Os demais valores são
+\begin{equation}
+\tau(S,D,R,C,M) = (-1)^S \sqrt{e}^{\,\ell} = (-1)^S e^{\ell/2}.
+\end{equation}
+Logo, os valores não nulos têm módulo entre $e^{-127{,}5}$ e
+$e^{127{,}5}$, isto é, cerca de $10^{\pm 55}$, para qualquer $n \geq 12$. A negação
+de um valor corresponde ao complemento de dois da palavra inteira
+(Proposição~6 de~\cite{hunhold2024beating}), e a ordem dos valores coincide
+com a ordem das palavras interpretadas como inteiros com sinal
+(Proposição~4). NaR fica fora dessa ordem; por convenção, é considerado
+menor que todos os valores, o que coincide com sua palavra ser o menor
+inteiro com sinal~\cite{hunhold2024beating}.
+
+A definição completa exige $n \geq 12$; palavras mais curtas são tratadas
+completando-se os bits ausentes com zeros (\emph{ghost
+bits})~\cite{hunhold2024beating}. Em T8, isso significa que, quando $r>3$,
+parte da característica não está armazenada e é implicitamente zero;
+por isso, a faixa de T8 é menor, com $|\ell| \leq 239$ ($\approx 10^{\pm 52}$).
+
+\subsection{Arredondamento}
+O arredondamento takum é feito no domínio logarítmico: o ponto médio entre
+dois valores vizinhos é a média geométrica, e não a aritmética. Valores fora
+da faixa saturam no maior ou menor valor representável, e nenhum valor não
+nulo é arredondado para 0 ou NaR~\cite{hunhold2024beating}. O Algoritmo~1 de
+\cite{hunhold2024beating} trunca a codificação exata para $n+1$ bits e
+incrementa a palavra quando o bit extra é 1; assim, os empates são
+resolvidos em direção à palavra seguinte, isto é, para cima na ordem dos
+valores. A libtakum~\cite{libtakum}, por sua vez, desempata para a
+palavra par (\emph{round to nearest, ties to even} -- RNE). Este trabalho
+segue a convenção da libtakum.
+
+\subsection{Takum linear e codec em hardware}
+Além da forma logarítmica, existe a variante linear, de valor
+$[(1-3S)+f]\cdot 2^{e}$ com $e=(-1)^S(c+S)$. Hunhold~\cite{hunhold2024codec}
+projetou um codec em hardware para as duas variantes e discutiu a
+representação interna adequada a cada uma. Para a forma logarítmica, a
+representação canônica após decodificação é o par $(S,\ell)$, reduzindo a
+multiplicação e a divisão a somas e subtrações em ponto fixo. Este trabalho
+adota a variante logarítmica, correspondente à família
+\texttt{takum\_log8/16/32} da libtakum.
+
+\subsection{Extensões SIMD, formatos de baixa precisão e CSRs}
+Em~\cite{hunhold2025avx}, as instruções do AVX10.2 são reescritas para operar
+sobre takums de 8 a 64 bits (T8 a T64), em lugar de IEEE~754 FP16 (1-5-10,
+\emph{bias} 15, máx.\ $65\,504$), bfloat16 (1-8-7) e dos formatos OFP8: E4M3
+(1-4-3, \emph{bias} 7, máx.\ $448$, sem infinito) e E5M2 (1-5-2, \emph{bias}
+15, máx.\ $57\,344$). Além da faixa dinâmica restrita de FP16, E4M3 e E5M2, o
+suporte a múltiplos layouts de expoente encarece os decodificadores vetoriais.
+Em Takum, todas as larguras compartilham o mesmo prefixo $(S,D,R,C)$ nos 12
+bits mais significativos. Na RVV~\cite{rvv}, o estado vetorial usa o
+comprimento físico VLEN, a largura SEW e o comprimento ativo VL, mas a
+aritmética IEEE~754 exige os CSRs \texttt{frm} (3 bits de modo de
+arredondamento) e \texttt{fflags} (5 bits de exceções: operação inválida,
+divisão por zero, \emph{overflow}, \emph{underflow} e inexato), combinados em
+\texttt{fcsr}. Como Takum usa arredondamento RNE fixo, satura sem
+\emph{overflow}/\emph{underflow} e propaga apenas \texttt{NaR} sem disparar
+\emph{flags}, dispensa \texttt{frm} e \texttt{fflags}.
+
+% ---------------------------------------------------------------------------
+\section{Metodologia e Arquitetura Proposta}
+\label{sec:metodo}
+
+A implementação foi escrita em C11 (\texttt{-std=c11}). A compilação
+padrão usa o tipo \texttt{\_\_float128} e a biblioteca libquadmath, que são
+extensões do GCC; por isso, foi feita com o GCC~13.3, com as opções
+\texttt{-O2 -Wall -Wextra -Wpedantic -Werror}. Com a opção
+\texttt{USE\_FLOAT128=0}, o código usa apenas \texttt{long double} e a
+biblioteca padrão do C11. O repositório está organizado nos seguintes módulos:
+\texttt{takum.h} e \texttt{Takum.c} contêm a extração de campos, a conversão e
+as operações escalares; \texttt{src/tk\_wide.h} seleciona o tipo intermediário
+(\texttt{\_\_float128} ou \texttt{long double}); \texttt{src/rvv\_takum.h} e
+\texttt{src/rvv\_takum.c} implementam o simulador vetorial; \texttt{tests/} e
+\texttt{examples/} abrigam a suíte de verificação e a demonstração; e
+\texttt{benchmark/benchmark.c} e \texttt{benchmark/benchmark\_takum.ipynb}
+implementam a avaliação experimental de SpMV e a geração das análises
+estatísticas. Trata-se de um modelo funcional em nível de instrução: reproduz
+bit a bit o resultado de cada operação, sem modelar portas lógicas,
+\emph{pipeline} ou latência de ciclos.
+
+\subsection{Decodificação}
+A função \texttt{tk\_extract} mascara a palavra para $n$ bits e extrai $S$,
+$D$ e os três bits de $R$. O valor de $r$ segue~\eqref{eq:r}, e o termo
+constante de $c$ é lido de uma tabela de 16 entradas (\texttt{C\_BIAS}) indexada por
+$8D+\mathrm{uint}(R)$. Dos $n-5$ bits restantes, os $\min(r, n-5)$ mais
+significativos formam $C$ e os demais formam $M$ (chamado \texttt{F} no código). Se $r$ for maior que o número de bits
+disponíveis, o que só ocorre em T8, os bits ausentes de $C$ são completados
+com zeros por um deslocamento à esquerda, o que equivale aos \emph{ghost
+bits}. Por exemplo, a palavra T8 \texttt{0x01} tem $r=7$, três bits de $C$
+armazenados e $c=-239$, sendo o menor valor positivo de T8. A
+Tabela~\ref{tab:p} resume a precisão resultante.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.15}
+\caption{Bits de mantissa $p$ por largura de palavra}
+\label{tab:p}
+\centering
+\begin{tabular}{c c c}
+\hline
+Formato & $n-5$ bits após $S,D,R$ & Bits de mantissa $p$ \\
+\hline
+T8  & 3  & $\max(0,\,3-r)$, de 0 a 3 \\
+T16 & 11 & $11-r$, de 4 a 11 \\
+T32 & 27 & $27-r$, de 20 a 27 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Codificação e arredondamento}
+A codificação é feita pela função interna \texttt{from\_log\_wide}, que
+recebe o sinal e $\ell = 2\ln|x|$ no tipo intermediário
+(\texttt{\_\_float128} na compilação padrão). Ela é usada por
+\texttt{tk\_from\_ld}, \texttt{tk\_add} e \texttt{tk\_sub}; a função
+pública \texttt{tk\_from\_log}, usada pela multiplicação, a chama com um
+$\ell$ em \texttt{long double}. Valores
+de $\ell$ além do maior módulo representável em T32 são limitados a
+$\pm(255-2^{-20})$. Em seguida o
+código calcula $c=\lfloor (-1)^S\ell \rfloor$ e $m$, escolhe os bits $D$ e
+$R$ pela tabela de termos constantes e monta um prefixo de 32 bits com $S$,
+$D$, $R$ e $C$. O prefixo é truncado para $n$ bits; os bits descartados do
+prefixo (só existem em T8, quando parte de $C$ não cabe) e a mantissa $m$,
+escalada para a posição de $M$ no formato de 32 bits, formam uma cauda
+cuja parte inteira completa a palavra e cuja parte fracionária decide o
+arredondamento ao mais próximo em $\ell$, com empate para par (\texttt{round\_even}). Como essa soma é feita sobre a palavra
+inteira, um \emph{carry} pode se propagar por $M$, $C$, $R$ e $D$. Por fim, aplica-se a saturação: um resultado que se
+tornaria 0 vira o valor não nulo de menor módulo, e um que se tornaria NaR
+vira o de maior módulo, ambos com o sinal da entrada. Na conversão de valores reais (\texttt{tk\_from\_ld}), NaN e
+infinitos geram NaR, e $\pm 0$ gera a palavra zero, que é única.
+
+\subsection{Operações aritméticas}
+\begin{itemize}
+\item \textbf{Multiplicação:} como $|x\cdot y| = \sqrt{e}^{\,\ell_x+\ell_y}$,
+o produto é obtido somando os logaritmos decodificados e combinando os
+sinais. Cada $\ell$ tem no máximo 8 bits inteiros e 27 fracionários, e a
+soma, no máximo 9 e 27; ela é, portanto, exata em \texttt{long double},
+que tem 64 bits de mantissa no x86-64. NaR tem precedência sobre
+zero ($0\cdot\mathrm{NaR}=\mathrm{NaR}$).
+\item \textbf{Soma e subtração:} os operandos são decodificados para
+IEEE binary128 (\texttt{\_\_float128}, libquadmath), somados e
+recodificados por $2\ln|x|$. Há uma compilação alternativa com
+\texttt{long double}, documentada como menos precisa perto das fronteiras
+de arredondamento.
+\item \textbf{Conversão de largura:} a ampliação é um deslocamento à
+esquerda. A redução arredonda os bits descartados da própria palavra, com
+empate para par e a mesma saturação, sem passar por ponto flutuante.
+\end{itemize}
+
+\subsection{Simulador vetorial}
+O estado do simulador (\texttt{tk\_sim}) tem 32 registradores de VLEN $=256$ bits, armazenados
+em bytes \emph{little-endian}, com LMUL fixo em 1, SEW $\in\{8,16,32\}$,
+VL $=\min(\mathrm{AVL}, \mathrm{VLEN}/\mathrm{SEW})$, um contador de
+programa (\texttt{pc}) e contadores de instruções (\texttt{retired}), de elementos (\texttt{elements}) e de configurações (\texttt{configurations}). As instruções usam uma
+codificação de 32 bits no estilo R com o \emph{opcode} \texttt{custom-0}
+(\texttt{0x0B}). Essa codificação foi escolhida pelo grupo e não é uma
+codificação oficial da RVV (Tabela~\ref{tab:isa}). Os campos vd, vs1 e vs2
+ocupam os bits 11:7, 19:15 e 24:20, o código da operação fica em funct7
+(bits 31:25) e o campo funct3 (bits 14:12) deve ser zero. Diferentemente
+de \texttt{vsub.vv} da RVV, que calcula $vs2-vs1$, \texttt{vtsub.vv}
+calcula $vs1-vs2$.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.15}
+\caption{Instruções vetoriais implementadas na proposta Zvtakum}
+\label{tab:isa}
+\centering
+\begin{tabular}{c l p{3.8cm}}
+\hline
+funct7 & Mnemônico & Semântica \\
+\hline
+0 & \texttt{vtadd.vv} & $vd_i = \mathrm{T}_{\mathrm{SEW}}(vs1_i + vs2_i)$, $i<\mathrm{VL}$\\
+1 & \texttt{vtsub.vv} & $vd_i = \mathrm{T}_{\mathrm{SEW}}(vs1_i - vs2_i)$\\
+2 & \texttt{vtmul.vv} & $vd_i = \mathrm{T}_{\mathrm{SEW}}(vs1_i \cdot vs2_i)$\\
+3 & \texttt{vtdot.vv} & $\sum_{i<\mathrm{VL}} vs1_i\, vs2_i$, sem quantizar os produtos, acumulado em \texttt{long double}; resultado em T32 nos 4 primeiros bytes de $vd$, qualquer que seja SEW\\
+4 & \texttt{vncvt.t.t} & converte VL elementos de SEW para SEW/2 (SEW $=16$ ou $32$)\\
+\hline
+\end{tabular}
+\end{table}
+
+Os registradores-fonte são copiados antes da execução, o que permite que o
+destino coincida com uma das fontes. Elementos além de VL (cauda) são
+preservados. Uma instrução ilegal (\emph{opcode}, funct3 ou funct7
+inválidos, ou \texttt{vncvt} com SEW $=8$ ou com o campo vs2 diferente de
+zero) não altera registradores, PC nem contadores. SEW e VL são
+configurados pela função do hospedeiro \texttt{tk\_sim\_setvl}, e os
+registradores são carregados por \texttt{tk\_sim\_load}, que quantiza
+valores reais para SEW; não há instruções de configuração nem de acesso à
+memória. A função \texttt{tk\_sim\_run} executa uma sequência de palavras
+de instrução e para no primeiro erro.
+
+\subsection{Metodologia de verificação}
+Foram usadas três frentes de verificação:
+\begin{enumerate}
+\item \textbf{Testes internos} (\texttt{make test}): todas as palavras T8
+e T16 e 100\,000 palavras T32 aleatórias, verificando ida e volta da
+codificação, elemento neutro da soma e da multiplicação, negação e
+$x + (-x) = 0$; casos de zero, NaR, saturação e empate; e semântica das
+instruções vetoriais, incluindo sobreposição de registradores, cauda,
+VL $=0$, instruções ilegais e 3\,000 cenários vetoriais aleatórios.
+\item \textbf{Referência em precisão quádrupla} (\texttt{make precision}):
+decodificador e quantizador escritos de forma independente em
+\texttt{\_\_float128}, com busca binária sobre os pontos médios exatos em
+$\ell$. A referência é aplicada, com ambos os sinais, ao valor \texttt{long double}
+mais próximo de cada ponto médio entre palavras vizinhas e aos seus dois
+vizinhos imediatos (todos os pontos médios positivos de T8 e T16 e
+100\,000 de T32), e à soma e à subtração (todos os pares T8 e 100\,000
+pares aleatórios em T16 e em T32).
+\item \textbf{Comparação com a libtakum} (\texttt{make oracle}): comparação
+com \texttt{takum\_log8/16/32} da libtakum, versão 2.0.0 (\emph{commit}
+\texttt{776ac0c}). São comparadas palavra a palavra a codificação
+(100\,000 valores aleatórios e 11 casos especiais por largura), as
+operações (todos os pares T8 e 100\,000 pares aleatórios em T16 e em T32)
+e a redução de largura (todas as palavras T16 e 100\,000 palavras T32). A
+decodificação (todas as palavras T8 e T16 e 100\,000 palavras T32) é
+comparada com tolerância relativa de $3\cdot 10^{-14}$, porque a
+libtakum calcula $\sqrt{e}^{\,\ell}$ com \texttt{pow} em \texttt{double} e
+uma constante $\sqrt{e}$ arredondada, enquanto este trabalho calcula
+$\exp(\ell/2)$ em \texttt{long double}.
+\end{enumerate}
+Os testes internos também foram executados com AddressSanitizer e
+UndefinedBehaviorSanitizer (\texttt{make sanitize}).
+
+\subsection{Metodologia de avaliação experimental (Benchmark SpMV)}
+Para avaliar o impacto da solução em álgebra linear esparsa, implementou-se em
+\texttt{benchmark/benchmark.c} a multiplicação de matriz esparsa por vetor
+($y = A\cdot x$, SpMV) armazenada em formato CSR (\texttt{row\_ptr},
+\texttt{col\_idx} e \texttt{vals}).
+\begin{enumerate}
+\item \textbf{Conjunto de teste e referência:} foram avaliadas matrizes
+quadradas de dimensões $n \in \{64, 128, 256, 512\}$, com 30 matrizes
+independentes por dimensão (120 matrizes no total), geradas por
+\texttt{xorshift32} a partir da semente \texttt{0xDEADBEEF} com 90\% de
+esparsidade (médias de $402{,}8$, $1\,630{,}3$, $6\,567{,}6$ e $26\,196{,}7$
+elementos não nulos para $n=64, 128, 256$ e $512$). As entradas não nulas de
+$A$ e o vetor denso $x$ são uniformes em $[-1, 1]$, e a referência
+$y_{\mathrm{ref}}$ é calculada em \texttt{\_\_float128} (\texttt{spmv\_ref}).
+\item \textbf{Formatos e modos de acumulação (11 configurações):}
+foram comparadas sete configurações IEEE~754/OFP8 e quatro configurações Takum:
+\begin{itemize}
+\item \emph{Acumulação estreita (\texttt{E4M3\_N}, \texttt{E5M2\_N},
+\texttt{F16\_N}):} operandos $A_{ij}$ e $x_j$, produto $A_{ij}x_j$ e soma
+parcial quantizados a cada passo em software (\texttt{quantize\_f8\_e4m3},
+\texttt{quantize\_f8\_e5m2} e \texttt{q16}, com acumulador \texttt{volatile} em
+\texttt{F16\_N} sob \texttt{-O2}).
+\item \emph{Acumulação ampliada (\texttt{E4M3\_W}, \texttt{E5M2\_W},
+\texttt{F16\_W}) e \texttt{F32}:} operandos quantizados no formato de 8 ou 16
+bits com produto e acumulador em FP32 (\texttt{float}), além do modo
+\texttt{F32} nativo.
+\item \emph{Takum com \texttt{vtdot.vv} (\texttt{T8}, \texttt{T16},
+\texttt{T32}):} cada linha é dividida em blocos de até
+$\mathrm{VL}_{\max} = 256/\mathrm{SEW} \in \{32, 16, 8\}$ elementos, carregados
+por \texttt{tk\_sim\_load} e reduzidos por \texttt{vtdot.vv} (acumulador
+\texttt{long double}), quantizando-se a soma final da linha para
+$\mathrm{T}_{\mathrm{SEW}}$.
+\item \emph{Takum T16 estreito (\texttt{T16W}):} executa \texttt{vtmul.vv} e
+\texttt{vtadd.vv} com $\mathrm{VL}=1$ (\texttt{spmv\_takum\_twidth}),
+arredondando cada produto e soma parcial para T16, de modo análogo a
+\texttt{F16\_N}.
+\end{itemize}
+\item \textbf{Métricas de erro e modelo de instruções:} para cada vetor
+estimado $\hat{y}$, calculam-se o erro relativo por elemento e o erro relativo
+\emph{normwise} (norma $\ell_2$):
+\begin{equation}
+e_i = \frac{|\hat{y}_i - y_{\mathrm{ref},i}|}{\max(|y_{\mathrm{ref},i}|, 10^{-30})},
+\qquad
+e_{\mathrm{norm}} = \frac{\|\hat{y} - y_{\mathrm{ref}}\|_2}{\|y_{\mathrm{ref}}\|_2}.
+\end{equation}
+De $\{e_i\}_{i=0}^{n-1}$ extraem-se média (\texttt{err\_mean}), RMS, máximo,
+percentis P50, P95 e P99 e a CDF empírica, com média e intervalo de confiança
+de 95\% (IC95) nas 30 matrizes por dimensão. Na contagem de instruções RVV, os
+$\mathrm{nnz}$ elementos formam $\lceil \mathrm{nnz}/\mathrm{VL}_{\max}\rceil$
+blocos: cada bloco requer 5 instruções no modelo IEEE (\texttt{vsetvli},
+\texttt{vle}, \texttt{vluxei}, \texttt{vfmul}, \texttt{vfredusum}) e em
+\texttt{T16W} (\texttt{vtmul}+\texttt{vtadd}), contra 4 instruções com
+\texttt{vtdot.vv} (\texttt{vsetvli}, \texttt{vle}, \texttt{vluxei},
+\texttt{vtdot}).
+\end{enumerate}
+
+% ---------------------------------------------------------------------------
+\section{Resultados e Discussão}
+\label{sec:result}
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.12}
+\caption{Resultados da verificação funcional e diferencial}
+\label{tab:verif}
+\centering
+\begin{tabular}{l r r}
+\hline
+Conjunto & Verificações & Falhas \\
+\hline
+Testes internos (\texttt{make test})      &   903\,584 & 0 \\
+Idem com ASan/UBSan (\texttt{make sanitize}) &   903\,584 & 0 \\
+Referência Float128 (\texttt{make precision}) & 1\,328\,424 & 0 \\
+Comparação com libtakum (\texttt{make oracle}) & 1\,427\,969 & 0 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.12}
+\caption{Saída da demonstração vetorial (valores decodificados)}
+\label{tab:demo}
+\centering
+\begin{tabular}{l c c c}
+\hline
+Operação / Elemento & T8 & T16 & T32 \\
+\hline
+$v1_1 = 2$            & 2,1170000 & 2,0004244 & 2,0000000 \\
+$v1_2 = -3$           & $-$3,0802168 & $-$3,0000616 & $-$3,0000000 \\
+\texttt{vtmul} $v1_2 \cdot v2_2$ & $-$7,3890561 & $-$6,0013965 & $-$6,0000000 \\
+\texttt{vtdot} (saída T32)  & $-$4,6827424 & $-$4,0020765 & $-$4,0000000 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table*}[!t]
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{3.5pt}
+\caption{Resumo de erro relativo (vs.\ Float128) e instruções RVV no benchmark SpMV (120 matrizes, esparsidade de 90\%)}
+\label{tab:spmv_summary}
+\centering
+\scriptsize
+\begin{tabular}{l c c c c c c r r}
+\hline
+\multirow{2}{*}{Formato} & \multicolumn{2}{c}{Média global (120 matrizes)} & \multicolumn{3}{c}{Percentis por elemento ($n=512$)} & \multirow{2}{*}{$\mathrm{VL}_{\max}$} & \multirow{2}{*}{Blocos médios} & \multirow{2}{*}{Instruções RVV} \\
+\cline{2-3} \cline{4-6}
+ & Erro médio $\pm$ IC95 & Erro \emph{normwise} $\pm$ IC95 & Mediana (P50) & P95 & P99 & & & \\
+\hline
+\texttt{E4M3\_N} & $3{,}79\cdot 10^{0} \pm 1{,}45\cdot 10^{0}$   & $8{,}51\cdot 10^{-1} \pm 6{,}66\cdot 10^{-2}$ & $1{,}14\cdot 10^{0}$  & $1{,}13\cdot 10^{1}$  & $6{,}64\cdot 10^{1}$  & 32 &   272,3 & 1\,361,7 \\
+\texttt{E4M3\_W} & $1{,}31\cdot 10^{0} \pm 4{,}06\cdot 10^{-1}$  & $2{,}67\cdot 10^{-1} \pm 7{,}08\cdot 10^{-3}$ & $2{,}45\cdot 10^{-1}$ & $2{,}94\cdot 10^{0}$  & $1{,}56\cdot 10^{1}$  & 32 &   272,3 & 1\,361,7 \\
+\texttt{E5M2\_N} & $1{,}01\cdot 10^{1} \pm 3{,}47\cdot 10^{0}$   & $1{,}94\cdot 10^{0} \pm 1{,}33\cdot 10^{-1}$  & $3{,}06\cdot 10^{0}$  & $3{,}26\cdot 10^{1}$  & $1{,}85\cdot 10^{2}$  & 32 &   272,3 & 1\,361,7 \\
+\texttt{E5M2\_W} & $1{,}89\cdot 10^{0} \pm 4{,}23\cdot 10^{-1}$  & $4{,}10\cdot 10^{-1} \pm 8{,}35\cdot 10^{-3}$ & $4{,}02\cdot 10^{-1}$ & $4{,}44\cdot 10^{0}$  & $2{,}49\cdot 10^{1}$  & 32 &   272,3 & 1\,361,7 \\
+\texttt{T8}      & $\mathbf{2{,}09\cdot 10^{-1} \pm 4{,}97\cdot 10^{-2}}$ & $\mathbf{5{,}01\cdot 10^{-2} \pm 1{,}34\cdot 10^{-3}}$ & $\mathbf{5{,}03\cdot 10^{-2}}$ & $\mathbf{4{,}28\cdot 10^{-1}}$ & $\mathbf{2{,}36\cdot 10^{0}}$ & 32 & 272,3 & \textbf{1\,089,4} \\
+\hline
+\texttt{F16\_N}  & $5{,}00\cdot 10^{-2} \pm 3{,}62\cdot 10^{-2}$ & $3{,}14\cdot 10^{-2} \pm 4{,}27\cdot 10^{-3}$ & $1{,}74\cdot 10^{-3}$ & $1{,}00\cdot 10^{-1}$ & $7{,}41\cdot 10^{-1}$ & 16 &   544,2 & 2\,721,0 \\
+\texttt{F16\_W}  & $3{,}89\cdot 10^{-2} \pm 3{,}57\cdot 10^{-2}$ & $1{,}46\cdot 10^{-2} \pm 2{,}94\cdot 10^{-3}$ & $2{,}90\cdot 10^{-4}$ & $2{,}60\cdot 10^{-2}$ & $3{,}30\cdot 10^{-1}$ & 16 &   544,2 & 2\,721,0 \\
+\texttt{T16W}    & $1{,}67\cdot 10^{-3} \pm 2{,}92\cdot 10^{-4}$ & $5{,}10\cdot 10^{-4} \pm 4{,}20\cdot 10^{-5}$ & $5{,}77\cdot 10^{-4}$ & $4{,}65\cdot 10^{-3}$ & $2{,}50\cdot 10^{-2}$ & 16 &   544,2 & 2\,721,0 \\
+\texttt{T16}     & $\mathbf{8{,}41\cdot 10^{-4} \pm 1{,}69\cdot 10^{-4}}$ & $\mathbf{1{,}96\cdot 10^{-4} \pm 5{,}49\cdot 10^{-6}}$ & $\mathbf{1{,}94\cdot 10^{-4}}$ & $\mathbf{1{,}69\cdot 10^{-3}}$ & $\mathbf{9{,}00\cdot 10^{-3}}$ & 16 & 544,2 & \textbf{2\,176,8} \\
+\hline
+\texttt{F32}     & $4{,}31\cdot 10^{-7} \pm 1{,}48\cdot 10^{-7}$ & $9{,}73\cdot 10^{-8} \pm 5{,}17\cdot 10^{-9}$ & $1{,}21\cdot 10^{-7}$ & $1{,}03\cdot 10^{-6}$ & $5{,}62\cdot 10^{-6}$ &  8 & 1\,087,9 & 5\,439,4 \\
+\texttt{T32}     & $\mathbf{2{,}92\cdot 10^{-8} \pm 1{,}86\cdot 10^{-9}}$ & $\mathbf{2{,}58\cdot 10^{-8} \pm 3{,}74\cdot 10^{-10}}$ & $\mathbf{2{,}15\cdot 10^{-8}}$ & $\mathbf{5{,}19\cdot 10^{-8}}$ & $\mathbf{1{,}52\cdot 10^{-7}}$ &  8 & 1\,087,9 & \textbf{4\,351,5} \\
+\hline
+\end{tabular}
+\end{table*}
+
+\subsection{Verificação funcional e diferencial}
+A Tabela~\ref{tab:verif} resume as verificações executadas nas Fases~1 e~2.
+Todas foram concluídas sem falhas, e os sanitizadores não relataram acessos
+inválidos nem comportamento indefinido.
+
+\subsection{Demonstração vetorial}
+A Tabela~\ref{tab:demo} mostra o programa de demonstração, executado com
+SEW de 8, 16 e 32 bits (colunas), com
+$v1 = (1, 2, -3, 0{,}5)$, $v2 = (4, -1, 2, 0)$ e VL $=4$. O efeito da
+quantização dos operandos é visível: em T8, o valor 2 é representado como
+$2{,}117$, e em T16 como $2{,}0004$. O produto escalar exato é $-4$; o
+resultado T32 de \texttt{vtdot.vv} reflete principalmente o erro de
+quantização das entradas, que é muito maior que o do acumulador.
+
+\subsection{Precisão numérica na multiplicação matriz-vetor esparsa}
+A Tabela~\ref{tab:spmv_summary} apresenta o resumo global das métricas de erro
+relativo em relação à referência \texttt{\_\_float128} sobre as 120 matrizes
+($n \in \{64, 128, 256, 512\}$), bem como os percentis P50 (mediana), P95 e P99
+da distribuição de erro por elemento na maior dimensão ($n=512$, totalizando
+$15\,360$ produtos internos por formato). A Tabela~\ref{tab:spmv_by_size}
+detalha a evolução do erro relativo \emph{normwise} e da contagem estimada de
+instruções RVV por dimensão $n$.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{2.2pt}
+\caption{Erro relativo normwise médio e instruções RVV por dimensão $n$}
+\label{tab:spmv_by_size}
+\centering
+\scriptsize
+\begin{tabular}{l c c c c}
+\hline
+Dimensão $n$ & $64$ & $128$ & $256$ & $512$ \\
+$\mathrm{nnz}$ médio & $402{,}8$ & $1\,630{,}3$ & $6\,567{,}6$ & $26\,196{,}7$ \\
+\hline
+\multicolumn{5}{l}{\emph{Erro relativo normwise médio ($\|\hat{y}-y_{\mathrm{ref}}\|_2 / \|y_{\mathrm{ref}}\|_2$):}} \\
+\texttt{E4M3\_N} & $4{,}42\cdot 10^{-1}$ & $6{,}54\cdot 10^{-1}$ & $9{,}12\cdot 10^{-1}$ & $1{,}40\cdot 10^{0}$ \\
+\texttt{E4M3\_W} & $2{,}69\cdot 10^{-1}$ & $2{,}70\cdot 10^{-1}$ & $2{,}59\cdot 10^{-1}$ & $2{,}69\cdot 10^{-1}$ \\
+\texttt{E5M2\_N} & $1{,}09\cdot 10^{0}$  & $1{,}55\cdot 10^{0}$  & $2{,}11\cdot 10^{0}$  & $3{,}01\cdot 10^{0}$ \\
+\texttt{E5M2\_W} & $3{,}97\cdot 10^{-1}$ & $4{,}10\cdot 10^{-1}$ & $4{,}09\cdot 10^{-1}$ & $4{,}25\cdot 10^{-1}$ \\
+\texttt{T8}      & $4{,}44\cdot 10^{-2}$ & $4{,}54\cdot 10^{-2}$ & $5{,}16\cdot 10^{-2}$ & $5{,}92\cdot 10^{-2}$ \\
+\texttt{F16\_N}  & $1{,}47\cdot 10^{-2}$ & $2{,}41\cdot 10^{-2}$ & $3{,}45\cdot 10^{-2}$ & $5{,}22\cdot 10^{-2}$ \\
+\texttt{F16\_W}  & $8{,}94\cdot 10^{-3}$ & $1{,}43\cdot 10^{-2}$ & $1{,}62\cdot 10^{-2}$ & $1{,}92\cdot 10^{-2}$ \\
+\texttt{T16W}    & $2{,}84\cdot 10^{-4}$ & $3{,}64\cdot 10^{-4}$ & $5{,}23\cdot 10^{-4}$ & $8{,}70\cdot 10^{-4}$ \\
+\texttt{T16}     & $1{,}73\cdot 10^{-4}$ & $1{,}75\cdot 10^{-4}$ & $2{,}01\cdot 10^{-4}$ & $2{,}36\cdot 10^{-4}$ \\
+\texttt{F32}     & $6{,}72\cdot 10^{-8}$ & $7{,}89\cdot 10^{-8}$ & $1{,}04\cdot 10^{-7}$ & $1{,}39\cdot 10^{-7}$ \\
+\texttt{T32}     & $2{,}62\cdot 10^{-8}$ & $2{,}56\cdot 10^{-8}$ & $2{,}58\cdot 10^{-8}$ & $2{,}55\cdot 10^{-8}$ \\
+\hline
+\multicolumn{5}{l}{\emph{Instruções RVV estimadas (IEEE / Takum \texttt{vtdot.vv}):}} \\
+8 bits (\texttt{T8})   & 65,3 / 52,3   & 257,5 / 206,0   & 1\,028,7 / 822,9   & 4\,095,3 / 3\,276,3 \\
+16 bits (\texttt{T16}) & 128,2 / 102,5 & 511,8 / 409,5   & 2\,055,0 / 1\,644,0 & 8\,188,8 / 6\,551,1 \\
+32 bits (\texttt{T32}) & 253,8 / 203,1 & 1\,021,5 / 817,2 & 4\,107,0 / 3\,285,6 & 16\,375,3 / 13\,100,3 \\
+\hline
+\end{tabular}
+\end{table}
+
+As Figuras~\ref{fig:cdf} e~\ref{fig:normwise} evidenciam o comportamento de
+cada família numérica por largura de bits:
+\begin{itemize}
+\item \textbf{Representações de 8 bits:} \texttt{T8} obtém erro \emph{normwise}
+médio global de $5{,}01\cdot 10^{-2}$ e mediana por elemento de
+$5{,}03\cdot 10^{-2}$ em $n=512$. Nos formatos OFP8 com acumulação estreita, o
+arredondamento repetido em baixa precisão degrada a soma à medida que o número
+de termos cresce ($\mathrm{nnz}_i \approx 51$ em $n=512$), elevando o erro
+\emph{normwise} de \texttt{E4M3\_N} para $1{,}40$ e o de \texttt{E5M2\_N} para
+$3{,}01$. Mesmo com acumulação em FP32, \texttt{T8} apresenta erro
+\emph{normwise} $5{,}3\times$ menor que \texttt{E4M3\_W} ($2{,}67\cdot 10^{-1}$)
+e $8{,}2\times$ menor que \texttt{E5M2\_W} ($4{,}10\cdot 10^{-1}$), além de
+mediana $4{,}9\times$ menor que \texttt{E4M3\_W}.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.98\columnwidth,
+    height=4.0cm,
+    xmode=log,
+    xmin=1e-10, xmax=1e3,
+    ymin=0, ymax=1.02,
+    xlabel={Erro relativo por elemento $|\hat{y}_i - y_{\mathrm{ref},i}|/|y_{\mathrm{ref},i}|$},
+    ylabel={Probabilidade acumulada},
+    grid=both,
+    grid style={dotted, gray!60},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize},
+    legend columns=2,
+    legend style={font=\tiny, at={(0.02,0.98)}, anchor=north west, draw=gray!50, fill=white, fill opacity=0.9, row sep=-1.5pt, column sep=2pt},
+    legend cell align={left}
+]
+% T32
+\addplot[color=brown!80!black, very thick] coordinates {
+(1.918e-10,0.005) (4.168e-10,0.010) (2.102e-09,0.050) (4.132e-09,0.100) (8.391e-09,0.200) (1.286e-08,0.300) (1.712e-08,0.400) (2.153e-08,0.500) (2.610e-08,0.600) (3.072e-08,0.700) (3.623e-08,0.800) (4.456e-08,0.900) (5.191e-08,0.950) (7.679e-08,0.980) (1.517e-07,0.991) (1.683e-06,0.999)
+}; \addlegendentry{T32}
+% F32
+\addplot[color=violet, thick, dashed] coordinates {
+(8.859e-10,0.005) (2.033e-09,0.010) (1.017e-08,0.050) (2.074e-08,0.100) (4.281e-08,0.200) (6.547e-08,0.300) (9.193e-08,0.400) (1.210e-07,0.500) (1.565e-07,0.600) (2.087e-07,0.700) (2.960e-07,0.800) (5.361e-07,0.900) (1.031e-06,0.950) (2.624e-06,0.980) (5.621e-06,0.991) (8.324e-05,0.999)
+}; \addlegendentry{F32}
+% T16
+\addplot[color=green!60!black, very thick] coordinates {
+(1.612e-06,0.005) (3.242e-06,0.010) (1.889e-05,0.050) (3.671e-05,0.100) (7.332e-05,0.200) (1.111e-04,0.300) (1.513e-04,0.400) (1.943e-04,0.500) (2.481e-04,0.600) (3.218e-04,0.700) (4.420e-04,0.800) (8.518e-04,0.900) (1.693e-03,0.950) (4.364e-03,0.980) (9.000e-03,0.991) (1.091e-01,0.999)
+}; \addlegendentry{T16}
+% T16W
+\addplot[color=olive!80!black, thick, densely dotted] coordinates {
+(4.422e-06,0.005) (1.053e-05,0.010) (5.055e-05,0.050) (1.012e-04,0.100) (2.011e-04,0.200) (3.135e-04,0.300) (4.360e-04,0.400) (5.769e-04,0.500) (7.517e-04,0.600) (1.006e-03,0.700) (1.417e-03,0.800) (2.469e-03,0.900) (4.654e-03,0.950) (1.106e-02,0.980) (2.498e-02,0.991) (2.911e-01,0.999)
+}; \addlegendentry{T16W}
+% F16_W
+\addplot[color=cyan!80!black, thick, dashed] coordinates {
+(2.279e-06,0.005) (4.543e-06,0.010) (2.178e-05,0.050) (4.335e-05,0.100) (9.383e-05,0.200) (1.448e-04,0.300) (2.068e-04,0.400) (2.903e-04,0.500) (4.163e-04,0.600) (6.152e-04,0.700) (1.064e-03,0.800) (3.417e-03,0.900) (2.599e-02,0.950) (1.431e-01,0.980) (3.301e-01,0.991) (3.789e+00,0.999)
+}; \addlegendentry{F16\_W}
+% F16_N
+\addplot[color=teal, thick, dashdotted] coordinates {
+(1.699e-05,0.005) (3.247e-05,0.010) (1.538e-04,0.050) (3.078e-04,0.100) (6.276e-04,0.200) (9.654e-04,0.300) (1.328e-03,0.400) (1.744e-03,0.500) (2.319e-03,0.600) (3.223e-03,0.700) (5.401e-03,0.800) (2.000e-02,0.900) (1.000e-01,0.950) (3.773e-01,0.980) (7.410e-01,0.991) (9.757e+00,0.999)
+}; \addlegendentry{F16\_N}
+% T8
+\addplot[color=blue!80!black, very thick] coordinates {
+(5.355e-04,0.005) (9.925e-04,0.010) (4.642e-03,0.050) (9.370e-03,0.100) (1.833e-02,0.200) (2.856e-02,0.300) (3.867e-02,0.400) (5.034e-02,0.500) (6.439e-02,0.600) (8.297e-02,0.700) (1.153e-01,0.800) (2.187e-01,0.900) (4.275e-01,0.950) (1.079e+00,0.980) (2.361e+00,0.991) (3.377e+01,0.999)
+}; \addlegendentry{T8}
+% E4M3_W
+\addplot[color=orange, thick, dashed] coordinates {
+(1.846e-03,0.005) (4.175e-03,0.010) (2.116e-02,0.050) (4.097e-02,0.100) (8.305e-02,0.200) (1.273e-01,0.300) (1.803e-01,0.400) (2.455e-01,0.500) (3.335e-01,0.600) (4.715e-01,0.700) (7.229e-01,0.800) (1.448e+00,0.900) (2.941e+00,0.950) (7.764e+00,0.980) (1.556e+01,0.991) (1.869e+02,0.999)
+}; \addlegendentry{E4M3\_W}
+% E5M2_W
+\addplot[color=magenta!80!black, thick, densely dotted] coordinates {
+(4.239e-03,0.005) (7.735e-03,0.010) (3.690e-02,0.050) (7.073e-02,0.100) (1.442e-01,0.200) (2.196e-01,0.300) (3.053e-01,0.400) (4.024e-01,0.500) (5.300e-01,0.600) (7.229e-01,0.700) (1.096e+00,0.800) (2.194e+00,0.900) (4.443e+00,0.950) (1.158e+01,0.980) (2.492e+01,0.991) (2.545e+02,0.999)
+}; \addlegendentry{E5M2\_W}
+% E4M3_N
+\addplot[color=orange!70!red, thick, dashdotted] coordinates {
+(9.850e-03,0.005) (2.212e-02,0.010) (9.984e-02,0.050) (1.945e-01,0.100) (3.965e-01,0.200) (6.197e-01,0.300) (8.670e-01,0.400) (1.144e+00,0.500) (1.520e+00,0.600) (2.040e+00,0.700) (2.954e+00,0.800) (5.739e+00,0.900) (1.125e+01,0.950) (3.159e+01,0.980) (6.635e+01,0.991) (6.668e+02,0.999)
+}; \addlegendentry{E4M3\_N}
+% E5M2_N
+\addplot[color=red!80!black, thick] coordinates {
+(4.433e-02,0.005) (8.487e-02,0.010) (3.972e-01,0.050) (7.387e-01,0.100) (1.306e+00,0.200) (1.827e+00,0.300) (2.388e+00,0.400) (3.057e+00,0.500) (3.970e+00,0.600) (5.412e+00,0.700) (8.152e+00,0.800) (1.616e+01,0.900) (3.259e+01,0.950) (8.755e+01,0.980) (1.850e+02,0.991) (2.054e+03,0.999)
+}; \addlegendentry{E5M2\_N}
+\end{axis}
+\end{tikzpicture}
+\caption{Função de distribuição acumulada (CDF) empírica do erro relativo por elemento em relação à referência Float128 para $n=512$ (30 matrizes).}
+\label{fig:cdf}
+\end{figure}
+
+\item \textbf{Representações de 16 bits:} na mediana de $n=512$, \texttt{T16}
+($1{,}94\cdot 10^{-4}$) supera \texttt{F16\_W} ($2{,}90\cdot 10^{-4}$) em
+$1{,}5\times$ e \texttt{F16\_N} ($1{,}74\cdot 10^{-3}$) em $9{,}0\times$.
+Isolando o acumulador (\texttt{T16W} vs.\ \texttt{F16\_N}), a mediana de
+\texttt{T16W} ($5{,}77\cdot 10^{-4}$) é $3{,}0\times$ inferior à de
+\texttt{F16\_N}. Comparar \texttt{T16} com \texttt{T16W} evidencia o ganho de
+\texttt{vtdot.vv}: o acumulador ampliado reduz o erro \emph{normwise} em
+$n=512$ de $8{,}70\cdot 10^{-4}$ para $2{,}36\cdot 10^{-4}$ ($3{,}7\times$). Na
+cauda superior (P95 e P99 da Figura~\ref{fig:cdf}), \texttt{F16\_W} e
+\texttt{F16\_N} exibem desvios maiores que elevam suas médias \emph{normwise}
+para $1{,}46\cdot 10^{-2}$ e $3{,}14\cdot 10^{-2}$.
+\item \textbf{Representações de 32 bits:} \texttt{T32} alcança mediana de
+$2{,}15\cdot 10^{-8}$ e erro \emph{normwise} médio de $2{,}58\cdot 10^{-8}$,
+invariante com $n$ (Figura~\ref{fig:normwise}), enquanto em \texttt{F32} o erro
+\emph{normwise} dobra entre $n=64$ ($6{,}72\cdot 10^{-8}$) e $n=512$
+($1{,}39\cdot 10^{-7}$).
+\end{itemize}
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.98\columnwidth,
+    height=3.9cm,
+    xmode=log, log basis x=2,
+    ymode=log,
+    xtick={64,128,256,512},
+    xticklabels={64,128,256,512},
+    ymin=1e-8, ymax=1e1,
+    xlabel={Dimensão da matriz esparsa ($n$)},
+    ylabel={Erro \emph{normwise} $\|\hat{y}-y_{\mathrm{ref}}\|_2/\|y_{\mathrm{ref}}\|_2$},
+    grid=both,
+    grid style={dotted, gray!60},
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize},
+    legend columns=3,
+    legend style={font=\tiny, at={(0.5,1.02)}, anchor=south, draw=gray!50, fill=white, row sep=-1.5pt, column sep=2pt},
+    legend cell align={left}
+]
+\addplot[color=red!80!black, mark=square*, mark size=1.3pt, thick] coordinates {(64,1.093e+00) (128,1.552e+00) (256,2.112e+00) (512,3.010e+00)}; \addlegendentry{E5M2\_N}
+\addplot[color=orange!70!red, mark=triangle*, mark size=1.5pt, thick, dashdotted] coordinates {(64,4.418e-01) (128,6.540e-01) (256,9.119e-01) (512,1.398e+00)}; \addlegendentry{E4M3\_N}
+\addplot[color=magenta!80!black, mark=diamond*, mark size=1.5pt, thick, densely dotted] coordinates {(64,3.971e-01) (128,4.099e-01) (256,4.090e-01) (512,4.250e-01)}; \addlegendentry{E5M2\_W}
+\addplot[color=orange, mark=triangle, mark size=1.5pt, thick, dashed] coordinates {(64,2.689e-01) (128,2.702e-01) (256,2.591e-01) (512,2.690e-01)}; \addlegendentry{E4M3\_W}
+\addplot[color=blue!80!black, mark=*, mark size=1.4pt, very thick] coordinates {(64,4.438e-02) (128,4.539e-02) (256,5.158e-02) (512,5.920e-02)}; \addlegendentry{T8}
+\addplot[color=teal, mark=x, mark size=1.8pt, thick, dashdotted] coordinates {(64,1.471e-02) (128,2.411e-02) (256,3.448e-02) (512,5.222e-02)}; \addlegendentry{F16\_N}
+\addplot[color=cyan!80!black, mark=+, mark size=1.8pt, thick, dashed] coordinates {(64,8.941e-03) (128,1.427e-02) (256,1.615e-02) (512,1.916e-02)}; \addlegendentry{F16\_W}
+\addplot[color=olive!80!black, mark=pentagon*, mark size=1.4pt, thick, densely dotted] coordinates {(64,2.840e-04) (128,3.641e-04) (256,5.230e-04) (512,8.700e-04)}; \addlegendentry{T16W}
+\addplot[color=green!60!black, mark=square*, mark size=1.3pt, very thick] coordinates {(64,1.735e-04) (128,1.751e-04) (256,2.014e-04) (512,2.358e-04)}; \addlegendentry{T16}
+\addplot[color=violet, mark=star, mark size=1.8pt, thick, dashed] coordinates {(64,6.724e-08) (128,7.894e-08) (256,1.044e-07) (512,1.386e-07)}; \addlegendentry{F32}
+\addplot[color=brown!80!black, mark=diamond*, mark size=1.5pt, very thick] coordinates {(64,2.618e-08) (128,2.558e-08) (256,2.579e-08) (512,2.546e-08)}; \addlegendentry{T32}
+\end{axis}
+\end{tikzpicture}
+\caption{Evolução do erro relativo \emph{normwise} médio com a dimensão da matriz $n$.}
+\label{fig:normwise}
+\end{figure}
+
+\subsection{Complexidade de instruções vetoriais e estado de CSRs}
+Como mostra a Tabela~\ref{tab:spmv_by_size}, formatos de mesma largura
+($\mathrm{SEW} \in \{8, 16, 32\}$) têm o mesmo $\mathrm{VL}_{\max} \in
+\{32, 16, 8\}$ ($\mathrm{VLEN}=256$ bits) e o mesmo número de blocos
+(\texttt{rvv\_chunks}). A fusão de multiplicação e redução em \texttt{vtdot.vv}
+reduz o custo de 5 para 4 instruções/bloco, gerando queda exata de 20\% nas
+instruções RVV em qualquer dimensão (de $8\,188{,}8$ em
+\texttt{F16\_N}/\texttt{F16\_W}/\texttt{T16W} para $6\,551{,}1$ em \texttt{T16}
+em $n=512$). Caso aplicações que tolerem erro relativo de $\sim 2\cdot 10^{-4}$
+substituam \texttt{F32} ($\mathrm{VL}_{\max}=8$, 5 instruções/bloco) por
+\texttt{T16} com \texttt{vtdot.vv} ($\mathrm{VL}_{\max}=16$, 4
+instruções/bloco), o total de instruções cai em 60\% (de $16\,375{,}3$ para
+$6\,551{,}1$ em $n=512$). A Tabela~\ref{tab:csr} resume a comparação
+arquitetural: sem modos dinâmicos de arredondamento nem \emph{flags} de
+exceção, Takum-RVV elimina \texttt{frm}, \texttt{fflags} e \texttt{fcsr},
+evitando contenção entre \emph{lanes} e reduzindo o estado salvo em trocas de
+contexto.
+
+\begin{table}[!t]
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{2.5pt}
+\caption{Comparação arquitetural e de CSRs: IEEE~754 vs.\ Takum-RVV}
+\label{tab:csr}
+\centering
+\scriptsize
+\begin{tabular}{l c c}
+\hline
+Característica arquitetural & IEEE~754 (RVV) & Takum-RVV \\
+\hline
+Modo de arredondamento (\texttt{frm}) & Sim (3 bits) & Não (0 bits) \\
+\emph{Flags} de exceção (\texttt{fflags}) & Sim (5 bits) & Não (0 bits) \\
+CSRs aritméticos (\texttt{frm}/\texttt{fflags}/\texttt{fcsr}) & 2 (3 c/ \texttt{fcsr}) & 0 \\
+Valores especiais por largura & $\pm 0, \pm\infty$, NaN, subn. & $0$ único e $\mathrm{NaR}$ \\
+Decodificador para T8/T16/T32 & Por formato & Único (12 MSBs) \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Discussão e limitações}
+A igualdade palavra a palavra com a libtakum na codificação, nas
+operações e na redução de largura, a concordância na decodificação e a
+referência independente em precisão quádrupla indicam que a decodificação, a
+codificação e a saturação seguem a definição do formato, e o
+arredondamento segue a convenção da libtakum, em todos os casos
+testados. A escolha do desempate para par segue a
+libtakum e difere do Algoritmo~1 de~\cite{hunhold2024beating}. Na
+multiplicação, cujo resultado exato em $\ell$ pode cair exatamente sobre
+um ponto médio, a diferença é concreta: em T8, $\texttt{0x02}\times
+\texttt{0x59}$ resulta em \texttt{0x02} com empate para par e resultaria
+em \texttt{0x03} pelo Algoritmo~1.
+
+Nos experimentos de SpMV, dois fatores explicam a vantagem numérica observada
+para Takum: (i) como as entradas $A_{ij}, x_j \in [-1, 1]$ têm módulo próximo
+da unidade, a maior parte dos operandos cai nos regimes $r=0$
+($|x|\in [e^{-1/2}, e^{1/2}]\approx [0{,}606, 1{,}649]$) e $r=1$
+($|x|\in [e^{-3/2}, e^{-1/2}]\approx [0{,}223, 0{,}606]$), onde a precisão
+afunilada aloca o número máximo de bits de mantissa ($p=3$ ou $2$ em T8,
+$p=11$ ou $10$ em T16 e $p=27$ ou $26$ em T32) e um incremento de $2^{-p}$ em
+$\ell$ corresponde a um passo relativo de $\tfrac{1}{2}\cdot 2^{-p}=2^{-(p+1)}$;
+e (ii) a instrução \texttt{vtdot.vv} acumula os produtos sem truncamento
+intermediário. Nota-se também que o erro relativo médio por elemento
+(\texttt{err\_mean}) é sistematicamente maior que o erro \emph{normwise} e que
+a mediana (Tabela~\ref{tab:spmv_summary}) porque entradas simétricas em
+$[-1,1]$ podem produzir componentes $y_{\mathrm{ref},i}$ próximas de zero por
+cancelamento subtrativo, inflando a razão $|\hat{y}_i-y_{\mathrm{ref},i}|/|y_{\mathrm{ref},i}|$
+em poucas linhas sem afetar significativamente $\|\hat{y}-y_{\mathrm{ref}}\|_2$.
+
+As limitações atuais do modelo e do \emph{benchmark} são:
+\begin{itemize}
+\item soma e subtração dependem de $\exp$ e $\ln$ da biblioteca do
+hospedeiro, que não garantem arredondamento correto em todos os casos;
+\item \texttt{vtdot.vv} acumula em \texttt{long double} (dependente da
+plataforma) e, quando $\mathrm{nnz}_i > \mathrm{VL}_{\max}$, os acumuladores
+parciais dos blocos são somados em \texttt{long double} pelo hospedeiro antes
+da quantização para $\mathrm{T}_{\mathrm{SEW}}$;
+\item em \texttt{benchmark.c}, as saídas de \texttt{T8}, \texttt{T16},
+\texttt{T16W} e \texttt{T32} são convertidas para \texttt{float} antes do
+cálculo de erro contra \texttt{\_\_float128}, impondo a \texttt{T32} um piso de
+truncamento de binary32 ($\sim 2{,}5\cdot 10^{-8}$), e a contagem de blocos
+$\lceil\mathrm{nnz}/\mathrm{VL}_{\max}\rceil$ usa o total global de não nulos;
+\item os quantizadores em software de \texttt{E4M3}, \texttt{E5M2} e
+\texttt{FP16} em \texttt{benchmark.c} usam arredondamento \emph{half-up} e,
+quando uma mantissa só de uns gera \emph{carry} para o bit 23, aplicam
+\texttt{mant >{}>= 1; exp++} sem zerar o bit de \emph{carry}, gerando
+\emph{outliers} na cauda superior (acima de P90--P95) que explicam a diferença
+entre a mediana de \texttt{F16\_W} ($2{,}90\cdot 10^{-4}$) e seu P99
+($3{,}30\cdot 10^{-1}$);
+\item o tempo medido ($\approx 40\text{ ms}$ em \texttt{T8}/\texttt{T16}/\texttt{T32}
+e $166\text{ ms}$ em \texttt{T16W} para $n=512$, contra $\le 0{,}49\text{ ms}$
+nos modos IEEE) reflete a emulação em software (\texttt{expl}/\texttt{logq}), e
+não latência de hardware; o simulador não modela \emph{pipeline}, máscaras nem
+memória.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\section{Conclusão}
+\label{sec:concl}
+
+Este trabalho apresentou um modelo funcional em C11 da aritmética Takum
+logarítmica (T8, T16 e T32) e um simulador de cinco instruções vetoriais
+customizadas para o RISC-V. O decodificador trata o regime de três bits, a
+característica variável e os \emph{ghost bits} de T8; o codificador arredonda a
+palavra ao mais próximo em $\ell$ (empate para par, como a libtakum) e satura
+sem gerar 0 ou NaR a partir de valores finitos não nulos, passando sem falhas
+por $3{,}66\cdot 10^{6}$ verificações funcionais, em \texttt{\_\_float128} e
+contra a libtakum.
+
+No \emph{benchmark} SpMV sobre 120 matrizes CSR, T8, T16 e T32 superaram os
+formatos IEEE~754/OFP8 de mesma largura em erro mediano e em norma $\ell_2$,
+destacando-se o ganho do acumulador ampliado de \texttt{vtdot.vv} frente a
+\texttt{T16W} e aos modos \emph{narrow}. Na arquitetura, \texttt{vtdot.vv}
+reduz em 20\% as instruções vetoriais por bloco na mesma largura (e em 60\% ao
+substituir FP32 por T16), o prefixo unificado permite compartilhar um único
+decodificador de 12 bits, e a ausência de arredondamento dinâmico e exceções
+sinalizadas elimina os CSRs \texttt{frm} e \texttt{fflags}. Trabalhos futuros
+incluem a síntese em RTL do codec e da ALU vetorial e testes com matrizes de
+faixa dinâmica extrema.
+
+% ---------------------------------------------------------------------------
+\begin{thebibliography}{9}
+
+\bibitem{hunhold2024beating}
+L.~Hunhold, ``Beating posits at their own game: Takum arithmetic,''
+\emph{arXiv preprint} arXiv:2404.18603v2, 2024.
+
+\bibitem{hunhold2024codec}
+L.~Hunhold, ``Design and implementation of a takum arithmetic hardware
+codec,'' \emph{arXiv preprint} arXiv:2408.10594v4, 2024 (rev.\ 2025).
+
+\bibitem{hunhold2025avx}
+L.~Hunhold, ``Streamlining SIMD ISA extensions with takum arithmetic: A
+case study on Intel AVX10.2,'' \emph{arXiv preprint} arXiv:2503.14067v2, 2025.
+
+\bibitem{libtakum}
+L.~Hunhold, ``libtakum,'' versão 2.0.0, \emph{commit} 776ac0c. [Online].
+Disponível em: \url{https://github.com/takum-arithmetic/libtakum}
+
+\bibitem{gustafson2017}
+J.~L. Gustafson e I.~T. Yonemoto, ``Beating floating point at its own
+game: Posit arithmetic,'' \emph{Supercomputing Frontiers and Innovations},
+vol.~4, n.~2, pp.~71--86, 2017, doi: 10.14529/jsfi170206.
+
+\bibitem{ieee754}
+\emph{IEEE Standard for Floating-Point Arithmetic}, IEEE Std 754-2019, 2019,
+doi: 10.1109/IEEESTD.2019.8766229.
+
+\bibitem{rvv}
+RISC-V International, \emph{RISC-V ``V'' Vector Extension}, versão 1.0,
+2021. [Online]. Disponível em:
+\url{https://github.com/riscv/riscv-v-spec}
+
+\end{thebibliography}
+
+\end{document}
